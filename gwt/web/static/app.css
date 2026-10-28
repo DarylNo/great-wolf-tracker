@@ -98,6 +98,14 @@ nav a.on, nav a:hover { color: var(--ink); box-shadow: inset 0 -2px 0 var(--ink)
 main.wrap { padding-top: 22px; padding-bottom: 56px; }
 footer.foot { color: var(--muted); font-size: 0.82rem; margin-top: 44px; max-width: 75ch; }
 .banner { background: var(--banner); color: var(--banner-ink); padding: 8px 0; font-size: 0.9rem; }
+.banner.warn { background: #fbe4e2; color: #7a1712; }
+.banner code, .alert code { overflow-wrap: anywhere; }  /* long file paths on a phone */
+.alert {
+  border: 1px solid #d03b3b; border-left-width: 6px; background: var(--surface); color: var(--ink);
+  border-radius: 8px; padding: 12px 14px; margin: 12px 0 16px; max-width: 110ch;
+}
+.alert strong { display: block; color: #b3261e; font-size: 1.02rem; margin-bottom: 4px; }
+.pager { display: flex; gap: 18px; align-items: center; margin: 14px 0; }
 
 h1 { font-size: 1.5rem; margin: 0 0 6px; }
 h2 { font-size: 1.12rem; margin: 34px 0 6px; }
@@ -238,12 +246,15 @@ table.data tr.soldout td { color: var(--muted); }
 .rooms details > .tablewrap { margin: 0 12px 12px 34px; }
 .rooms .variants { background: var(--surface); }
 .rooms .variants th, .rooms .variants td { font-size: 0.84rem; padding: 5px 8px; }
+.rooms .m0 { display: none; }
 @media (max-width: 699px) {
   .rooms { min-width: 0; }
   .rooms .hdr, .rooms summary {
-    grid-template-columns: minmax(0, 1fr) 46px repeat(var(--fams, 1), 72px);
-    gap: 6px; padding: 8px 10px;
+    grid-template-columns: minmax(0, 1fr) 44px repeat(var(--fams, 1), 64px);
+    column-gap: 12px; row-gap: 6px; padding: 8px 10px;
   }
+  .rooms .m2 { display: none; }
+  .rooms .m0 { display: inline; }
   .rooms .c-cat, .rooms .c-occ, .rooms .c-acc, .rooms .c-badge { display: none; }
   .rooms summary .name { overflow-wrap: anywhere; }
   .rooms details > .tablewrap { margin: 0 8px 10px; }

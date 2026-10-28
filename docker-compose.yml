@@ -1,5 +1,7 @@
 # Great Wolf Tracker: web dashboard on :8080 plus the in-container sweep scheduler.
-# Unraid: point the volume at appdata, e.g. /mnt/user/appdata/great-wolf-tracker:/app/data
+# Unraid: keep the database on a pool path, not the /mnt/user FUSE path (SQLite's WAL and
+# file locks aren't reliable through shfs), e.g. /mnt/cache/appdata/great-wolf-tracker:/app/data
+# or an appdata share set to Exclusive access. See README "Deploying on Unraid".
 # The host folder must be writable by uid 1000 (the container user).
 services:
   gwt:
@@ -7,17 +9,20 @@ services:
     image: great-wolf-tracker:latest
     container_name: great-wolf-tracker
     restart: unless-stopped
+    # On stop, a running sweep stops at the next date (or wakes from its wait), records
+    # itself as "interrupted" and exits. 45 s covers one request hitting its 30 s timeout.
+    stop_grace_period: 45s
     ports:
       - "8080:8080"           # LAN only: no auth, don't expose to the internet
     volumes:
-      - ./data:/app/data      # Unraid: /mnt/user/appdata/great-wolf-tracker:/app/data
+      - ./data:/app/data      # Unraid: /mnt/cache/appdata/great-wolf-tracker:/app/data
     environment:
       GWT_TZ: America/Toronto
       GWT_SCHEDULE_ENABLED: "true"
       GWT_FULL_SWEEP_CRON: "17 3 * * 0"    # Sundays 03:17 -> next 365 days
       GWT_FULL_SWEEP_DAYS: "365"
-      GWT_DAILY_SWEEP_CRON: "43 5 * * *"   # daily 05:43 -> next 30 days ("off" to disable)
-      GWT_DAILY_SWEEP_DAYS: "30"
+      GWT_DAILY_SWEEP_CRON: "43 5 * * *"   # daily 05:43 -> next 38 days ("off" to disable)
+      GWT_DAILY_SWEEP_DAYS: "38"
       # GWT_PORT: "8080"
       # GWT_USER_AGENT: "great-wolf-tracker/0.1 (...)"
       # GWT_EVENTS_FILE: /app/data/calendar_events.yaml   # edit school dates without a rebuild

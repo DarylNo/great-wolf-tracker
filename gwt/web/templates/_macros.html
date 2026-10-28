@@ -3,8 +3,20 @@
   <strong>No data yet</strong>
   {{ what }}
   Data appears after the first sweep. It runs on the schedule (see <a href="/runs">Runs</a>), or start one by hand with
-  <code>docker compose exec gwt python -m gwt sweep --days 30</code>.
+  <code>docker compose exec gwt python -m gwt sweep --days 38</code>.
 </div>
+{% endmacro %}
+
+{# Shown on Plan and Runs while collection is paused after a 403 (db.collection_pause). #}
+{% macro pause_banner(pause, message) %}
+{% if pause %}
+<div class="alert" role="alert" aria-label="{{ message }}">
+  <strong>Collection paused: blocked (403) on {{ pause.date }}, run <code>gwt unblock</code> after reviewing.</strong>
+  <div>Run {{ pause.run_id }} stopped with: {{ pause.message or 'HTTP 403' }}. Scheduled sweeps skip while paused, and a
+  manual <code>gwt sweep</code> refuses unless given <code>--force</code>. Once you've reviewed it, resume with
+  <code>docker compose exec gwt python -m gwt unblock</code>.</div>
+</div>
+{% endif %}
 {% endmacro %}
 
 {% macro event_tags(closures, info=[]) %}

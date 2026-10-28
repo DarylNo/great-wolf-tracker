@@ -6,11 +6,13 @@ reflects the latest known description of each suite type plus when it was first/
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import zlib
 from pathlib import Path
 
 from gwt.collector import Snapshot
-from gwt.metrics import lead_days
+from gwt.metrics import lead_days, scrape_local_date
 
 DEFAULT_DB_PATH = Path("data/gwl.db")
 
@@ -26,7 +28,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     min_rate                REAL,
     ref_suite_rate          REAL,               -- SFSSB
     error_code              TEXT,
-    raw_json                TEXT,               -- pricingKey stripped
+    raw_json                TEXT,               -- pricingKey stripped; zlib BLOB (older rows: plain TEXT)
     UNIQUE (run_id, arrival_date)
 );
 
@@ -119,29 +121,53 @@ _ADDED_COLUMNS = {
     },
 }
 
-# Backfill for a column the first time it's added to an existing database.
-_BACKFILL = {
-    ("suites", "max_rooms_seen"): """UPDATE suites SET max_rooms_seen = (
-        SELECT MAX(available_room_count) FROM suite_snapshots ss WHERE ss.suite_code = suites.suite_code)""",
-    ("suites", "min_rate_seen"): """UPDATE suites SET min_rate_seen = (
-        SELECT MIN(min_total_nightly_rate) FROM suite_snapshots ss WHERE ss.suite_code = suites.suite_code)""",
-}
+# Idempotent backfills, re-run on every connect: they only touch rows still NULL, so they
+# finish an interrupted earlier migration and cost nothing once done.
+_BACKFILLS = (
+    """UPDATE suites SET max_rooms_seen = (
+           SELECT MAX(available_room_count) FROM suite_snapshots ss WHERE ss.suite_code = suites.suite_code)
+       WHERE max_rooms_seen IS NULL""",
+    """UPDATE suites SET min_rate_seen = (
+           SELECT MIN(min_total_nightly_rate) FROM suite_snapshots ss WHERE ss.suite_code = suites.suite_code)
+       WHERE min_rate_seen IS NULL""",
+)
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    for table, cols in _ADDED_COLUMNS.items():
-        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        for name, typ in cols.items():
-            if name not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
-                backfill = _BACKFILL.get((table, name))
-                if backfill:
-                    conn.execute(backfill)
-    conn.commit()
+def _statements(script: str) -> list[str]:
+    """Split a SQL script into complete statements (comments may contain ';')."""
+    out, buf = [], ""
+    for line in script.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            out.append(buf)
+            buf = ""
+    return out
+
+
+SCHEMA_STATEMENTS = _statements(SCHEMA)
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Create/upgrade the schema in one IMMEDIATE transaction: all of it applies, or none."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for stmt in SCHEMA_STATEMENTS:
+            conn.execute(stmt)
+        for table, cols in _ADDED_COLUMNS.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, typ in cols.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+        for sql in _BACKFILLS:
+            conn.execute(sql)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Read-write connection; creates the file and schema if needed."""
+    """Read-write connection; creates the file and schema if needed, and migrates it."""
     path = Path(path)
     conn_target = str(path)
     if conn_target != ":memory:":
@@ -150,9 +176,71 @@ def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     if conn_target != ":memory:":
         # WAL lets the web dashboard read while a sweep is writing.
         conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(SCHEMA)
-    _migrate(conn)
+    migrate(conn)
     return conn
+
+
+def migrate_file(path: str | Path, lock_wait: float = 10.0) -> str:
+    """Migrate a database file before serving it (web startup).
+
+    Takes the sweep lock (waiting at most `lock_wait` seconds) so a migration never runs
+    alongside a sweep from this machine. If a sweep holds the lock longer, that sweep has
+    already migrated the file on connect (same code), and the migration below is a no-op
+    that SQLite's own write lock serialises with it, so startup never deadlocks.
+    """
+    from gwt.locking import SweepBusy, sweep_lock
+
+    try:
+        with sweep_lock(path, wait=lock_wait):
+            connect(path).close()
+            return "migrated"
+    except SweepBusy:
+        connect(path).close()
+        return "migrated while a sweep was running"
+
+
+# --------------------------------------------------------------------------- raw JSON
+
+
+def encode_raw_json(text: str | None) -> bytes | None:
+    """raw_json is stored zlib-compressed (a BLOB); older rows are plain TEXT."""
+    return None if text is None else zlib.compress(text.encode("utf-8"), 6)
+
+
+def decode_raw_json(value: bytes | str | None) -> dict | None:
+    """Read raw_json from either format (compressed BLOB or older plain TEXT)."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = zlib.decompress(bytes(value)).decode("utf-8")
+    return json.loads(value)
+
+
+# --------------------------------------------------------------------------- backup
+
+
+def backup(path: str | Path, out: str | Path) -> dict:
+    """Consistent copy of a live database (safe with WAL) using SQLite's backup API.
+
+    The source is opened with plain sqlite3 (no migration), so a backup taken before an
+    upgrade is an exact copy of the old schema.
+    """
+    path, out = Path(path), Path(out)
+    if not path.exists():
+        raise FileNotFoundError(f"no database at {path}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(str(path), timeout=30)
+    dst = sqlite3.connect(str(out))
+    try:
+        src.backup(dst)
+        check = dst.execute("PRAGMA quick_check").fetchone()[0]
+        tables = {r[0] for r in dst.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        counts = {t: dst.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                  for t in ("snapshots", "suite_snapshots", "runs") if t in tables}
+    finally:
+        dst.close()
+        src.close()
+    return {"quick_check": check, "bytes": out.stat().st_size, **counts}
 
 
 def connect_readonly(path: str | Path) -> sqlite3.Connection | None:
@@ -201,6 +289,53 @@ def update_run(conn: sqlite3.Connection, run_row_id: int, **fields) -> None:
         conn.execute(f"UPDATE runs SET {assignments} WHERE id = ?", (*fields.values(), run_row_id))
 
 
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def collection_pause(conn: sqlite3.Connection) -> dict | None:
+    """Collection is paused while the latest run was blocked (HTTP 403) and not yet unblocked."""
+    try:
+        latest = conn.execute(
+            "SELECT id, run_id, started_at, finished_at, message, blocked FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:  # no runs table yet
+        return None
+    if not latest or not latest[5]:
+        return None
+    try:
+        acknowledged = int(get_meta(conn).get("unblocked_run_id") or 0)
+    except ValueError:
+        acknowledged = 0
+    if latest[0] <= acknowledged:
+        return None
+    return {
+        "run_row": latest[0],
+        "run_id": latest[1],
+        "started_at": latest[2],
+        "finished_at": latest[3],
+        "message": latest[4],
+        "date": scrape_local_date(latest[2]).isoformat(),
+    }
+
+
+def pause_message(pause: dict) -> str:
+    return (f"Collection paused: blocked (403) on {pause['date']}, "
+            "run `gwt unblock` after reviewing.")
+
+
+def acknowledge_block(conn: sqlite3.Connection) -> dict | None:
+    """`gwt unblock`: let sweeps run again after a reviewed 403. Returns the cleared pause."""
+    pause = collection_pause(conn)
+    if pause is not None:
+        set_meta(conn, "unblocked_run_id", str(pause["run_row"]))
+    return pause
+
+
 def mark_interrupted(conn: sqlite3.Connection, finished_at: str) -> int:
     """Close out 'running' rows left by a crashed/killed sweep. Call only while holding the sweep lock."""
     with conn:
@@ -235,7 +370,7 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
                 snap.min_rate,
                 snap.ref_suite_rate,
                 snap.error_code,
-                snap.raw_json,
+                encode_raw_json(snap.raw_json),
             ),
         )
         for s in snap.suites:

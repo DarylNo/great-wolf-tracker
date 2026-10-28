@@ -2,8 +2,12 @@
 
 Every number comes from the definitions in gwt.metrics. A per-database `Stats` object
 (every snapshot with its Toronto lead time, the capacity estimate, the pace table and the
-final fills) is cached and rebuilt only when new snapshots arrive (MAX(snapshots.id) changes).
-Builders return plain dicts so the same data serves the HTML templates and /api routes.
+final fills) is cached and rebuilt only when new snapshots arrive (MAX(snapshots.id) changes);
+while a sweep is writing, at most once a minute. Builders return plain dicts so the same data
+serves the HTML templates and /api routes.
+
+Suite codes are always shown under their catalogue room (the `suites` table's latest name for
+the code), so a suite renamed by Great Wolf keeps one row, one slug and its whole history.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import math
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -23,7 +28,6 @@ from gwt.rooms import Variant, category_rank, group_rooms, slugify
 from gwt.web import fmt
 
 HORIZON_DAYS = 365
-CALENDAR_MONTHS = 12
 FILLING_WINDOW_DAYS = 60
 LIST_LENGTH = 12
 RAMP_STEPS = 5
@@ -44,9 +48,10 @@ CHEAPEST_RULE = (
     "Next 12 months, sold-out nights left out."
 )
 FILLING_RULE = (
-    "Next 60 days, most rooms sold in the last 7 days first. Nights without a scrape 6–8 days "
-    "earlier come after, ordered by pace (vs other dates at the same days-out). Sold-out nights left out."
+    "Next 60 days. Nights that sold rooms in the last 7 days come first, most sold first; the rest "
+    "follow by pace (vs other dates at the same days-out). Sold-out nights left out."
 )
+STATS_REBUILD_INTERVAL_S = 60.0  # while a sweep is writing, rebuild Stats at most this often
 
 
 # --------------------------------------------------------------------------- stats cache
@@ -110,11 +115,23 @@ class Stats:
             if f is not None:
                 self.final[d] = f
         self.last_scraped_at = snaps[-1].scraped_at if snaps else None
+        self.built_at = time.monotonic()
         self._memo: OrderedDict = OrderedDict()
         self._lock = threading.Lock()
+        self._bands: dict[str, list[list[float]]] = {}
 
     def pickup(self, s: Snap) -> int | None:
         return M.pickup_7d(self.by_date.get(s.arrival, []), s)
+
+    def band_buckets(self, field_name: str) -> list[list[float]]:
+        """Every snapshot's `rooms` or `min_rate`, sorted per lead bucket (built once per version)."""
+        with self._lock:
+            cached = self._bands.get(field_name)
+        if cached is None:
+            cached = M.bucket_values((s.lead, getattr(s, field_name)) for s in self.snaps)
+            with self._lock:
+                self._bands[field_name] = cached
+        return cached
 
     MEMO_LIMIT = 24  # per-room histories are large (one row per snapshot); keep only recent ones
 
@@ -144,16 +161,54 @@ def has_data(conn: sqlite3.Connection | None) -> bool:
         return False
 
 
-def get_stats(conn: sqlite3.Connection, key: str, final_fill_max_lead: int = M.DEFAULT_FINAL_FILL_MAX_LEAD) -> Stats:
+def sweep_running(conn: sqlite3.Connection) -> bool:
+    """True while the latest run is still writing (status 'running')."""
+    try:
+        row = conn.execute("SELECT status FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return bool(row) and row[0] == "running"
+
+
+_build_locks: dict[str, threading.Lock] = {}
+
+
+def get_stats(
+    conn: sqlite3.Connection,
+    key: str,
+    final_fill_max_lead: int = M.DEFAULT_FINAL_FILL_MAX_LEAD,
+    clock: Callable[[], float] = time.monotonic,
+) -> Stats:
+    """The cached Stats for this database, rebuilt when new snapshots arrive.
+
+    During a sweep MAX(snapshots.id) changes every few seconds; rebuilding on every request
+    then would mean a full rebuild per page view. So while the latest run is 'running', a Stats
+    up to STATS_REBUILD_INTERVAL_S old is served as is (pages lag the sweep by up to a minute).
+    """
     version = (conn.execute("SELECT MAX(id) FROM snapshots").fetchone()[0], final_fill_max_lead)
+
+    def usable(s: Stats | None) -> bool:
+        if s is None or s.version[1] != final_fill_max_lead:
+            return False
+        if s.version == version:
+            return True
+        return clock() - s.built_at < STATS_REBUILD_INTERVAL_S and sweep_running(conn)
+
     with _stats_lock:
         cached = _stats_cache.get(key)
-        if cached is not None and cached.version == version:
+        build_lock = _build_locks.setdefault(key, threading.Lock())
+    if usable(cached):
+        return cached
+    with build_lock:  # one rebuild at a time; requests that waited reuse its result
+        with _stats_lock:
+            cached = _stats_cache.get(key)
+        if usable(cached):
             return cached
-    stats = Stats(conn, version, final_fill_max_lead)
-    with _stats_lock:
-        _stats_cache[key] = stats
-    return stats
+        stats = Stats(conn, version, final_fill_max_lead)
+        stats.built_at = clock()
+        with _stats_lock:
+            _stats_cache[key] = stats
+        return stats
 
 
 def is_demo(conn: sqlite3.Connection | None) -> bool:
@@ -252,6 +307,13 @@ class Catalogue:
         room = self.by_name.get(name)
         return room.slug if room else slugify(name)
 
+    def room_name(self, code: str | None, snapshot_name: str | None) -> str:
+        """The catalogue room a code belongs to, whatever name the snapshot row carried."""
+        room = self.by_code.get(code) if code else None
+        if room is not None:
+            return room.name
+        return snapshot_name or code or "?"
+
     def reference_rates(self) -> dict[str, float | None]:
         """Each room's usual price level (lowest rate ever seen), for a stable sort order."""
         return {r.name: r.min_rate for r in self.rooms}
@@ -283,11 +345,13 @@ def catalogue(conn: sqlite3.Connection, stats: Stats) -> Catalogue:
 
 
 def latest_room_summary(conn: sqlite3.Connection, stats: Stats, start: date, end: date) -> dict[date, dict]:
-    """Per arrival date (latest snapshot): rooms left and cheapest rate per room, and sold-out counts."""
+    """Per arrival date (latest snapshot): rooms left and cheapest rate per catalogue room, and
+    sold-out counts."""
 
     def build() -> dict[date, dict]:
+        cat = catalogue(conn, stats)
         rows = conn.execute(
-            """SELECT ss.arrival_date, COALESCE(ss.suite_brand, ss.suite_code), ss.available_room_count,
+            """SELECT ss.arrival_date, ss.suite_code, ss.suite_brand, ss.available_room_count,
                       ss.min_total_nightly_rate
                FROM snapshots s
                JOIN suite_snapshots ss ON ss.arrival_date = s.arrival_date AND ss.run_id = s.run_id
@@ -297,7 +361,8 @@ def latest_room_summary(conn: sqlite3.Connection, stats: Stats, start: date, end
             (start.isoformat(), end.isoformat()),
         ).fetchall()
         per_date: dict[date, dict[str, list]] = {}
-        for arrival, name, rooms, rate in rows:
+        for arrival, code, brand, rooms, rate in rows:
+            name = cat.room_name(code, brand)
             agg = per_date.setdefault(date.fromisoformat(arrival), {}).setdefault(name, [0, None])
             rooms = rooms or 0
             agg[0] += rooms
@@ -408,9 +473,11 @@ def night_tip(n: dict, today: date) -> str:
 
 
 def _month_grids(today: date, nights: dict[date, dict], end: date) -> list[dict]:
+    """Wall-calendar months from today's month through the month of `end`: 13 months unless
+    today is the 1st, so every one of the 365 nights has a cell (the last month is partial)."""
     months = []
     y, m = today.year, today.month
-    for _ in range(CALENDAR_MONTHS):
+    while date(y, m, 1) <= end:
         first = date(y, m, 1)
         nxt = date(y + (m == 12), m % 12 + 1, 1)
         cells: list[dict | None] = [None] * ((first.weekday() + 1) % 7)  # Sunday-first
@@ -421,6 +488,18 @@ def _month_grids(today: date, nights: dict[date, dict], end: date) -> list[dict]
         months.append({"title": f"{MONTH_LONG[m - 1]} {y}", "cells": cells})
         y, m = nxt.year, nxt.month
     return months
+
+
+def filling_fastest(window: list[dict], limit: int = LIST_LENGTH) -> list[dict]:
+    """Nights that sold rooms in the last 7 days (pickup > 0) first, most sold first; then the
+    rest (no pickup yet, or none sold / rooms released) by pace, fastest first. Sold-out
+    nights and nights with neither signal are left out."""
+    open_nights = [n for n in window if n["has_data"] and not n["sold_out"]]
+    selling = sorted((n for n in open_nights if (n["pickup_7d"] or 0) > 0),
+                     key=lambda n: (-n["pickup_7d"], -(n["pace_pct"] if n["pace_pct"] is not None else -1), n["date"]))
+    rest = sorted((n for n in open_nights if (n["pickup_7d"] or 0) <= 0 and n["pace_pct"] is not None),
+                  key=lambda n: (-n["pace_pct"], n["date"]))
+    return (selling + rest)[:limit]
 
 
 def plan(conn: sqlite3.Connection, stats: Stats, today: date) -> dict:
@@ -454,12 +533,7 @@ def plan(conn: sqlite3.Connection, stats: Stats, today: date) -> dict:
 
     priced = [n for n in nights if n["has_data"] and n["min_rate"] is not None and not n["sold_out"]]
     cheapest = sorted(priced, key=lambda n: (n["min_rate"], -n["rooms_left"], n["date"]))[:LIST_LENGTH]
-    window = [n for n in nights[:FILLING_WINDOW_DAYS] if n["has_data"] and not n["sold_out"]]
-    with_pickup = sorted((n for n in window if n["pickup_7d"] is not None),
-                         key=lambda n: (-n["pickup_7d"], -(n["pace_pct"] or 0), n["date"]))
-    by_pace = sorted((n for n in window if n["pickup_7d"] is None and n["pace_pct"] is not None),
-                     key=lambda n: (-n["pace_pct"], n["date"]))
-    filling = (with_pickup + by_pace)[:LIST_LENGTH]
+    filling = filling_fastest(nights[:FILLING_WINDOW_DAYS])
 
     scatter = [
         {
@@ -494,6 +568,9 @@ def plan(conn: sqlite3.Connection, stats: Stats, today: date) -> dict:
 def status(stats: Stats) -> dict:
     return {
         "capacity_est": stats.capacity,
+        # For sentences: "capacity estimate 412 rooms" / "... not available yet".
+        "capacity_text": (f"{stats.capacity:,} rooms" if stats.capacity
+                          else "not available yet (no scrape has seen a room available)"),
         "capacity_provisional": stats.provisional,
         "capacity_caveat": M.CAPACITY_CAVEAT if stats.provisional else None,
         "far_dates_seen": stats.far_dates,
@@ -525,6 +602,12 @@ def _closure_spans(start: date, end: date) -> list[dict]:
         spans.append({"start": a.isoformat(), "end": b.isoformat(), "nights": (b - a).days + 1,
                       "title": title, "labels": labels})
     return spans
+
+
+def week_label(year: int, week: int) -> str:
+    """'Dec 24–Dec 31' for week 52 of 2026: the nights week_of_year puts in that week."""
+    first, last = M.week_dates(year, week)
+    return f"{fmt.date_short(first)}–{fmt.date_short(last)}"
 
 
 def seasonality(stats: Stats, today: date) -> dict:
@@ -584,6 +667,7 @@ def seasonality(stats: Stats, today: date) -> dict:
         "final_fill_nights": len(finals),
         "years": years,
         "panels": panels,
+        "week_labels": {str(y): [week_label(y, w) for w in range(1, 53)] for y in years},
         "week_spans": week_spans,
         "forecast": weeks,
         "forecast_spans": forecast_spans,
@@ -594,16 +678,20 @@ def seasonality(stats: Stats, today: date) -> dict:
 # --------------------------------------------------------------------------- date page
 
 
-def snapshot_variants(conn: sqlite3.Connection, run_id: str, arrival: date) -> tuple[list[Variant], list[str]]:
+def snapshot_variants(
+    conn: sqlite3.Connection, run_id: str, arrival: date, cat: Catalogue | None = None
+) -> tuple[list[Variant], list[str]]:
+    """Suite rows of one snapshot as Variants, named by their catalogue room when `cat` is given."""
     rows = conn.execute(
-        """SELECT id, suite_code, COALESCE(suite_brand, suite_code), suite_category, available_room_count,
+        """SELECT id, suite_code, suite_brand, suite_category, available_room_count,
                   min_total_nightly_rate, is_accessible, num_beds, num_baths, max_occupancy, sort_order
            FROM suite_snapshots WHERE arrival_date = ? AND run_id = ?""",
         (arrival.isoformat(), run_id),
     ).fetchall()
     variants: dict[int, Variant] = {}
     for r in rows:
-        variants[r[0]] = Variant(code=r[1], name=r[2], category=r[3], rooms=r[4], min_rate=r[5], accessible=r[6],
+        name = cat.room_name(r[1], r[2]) if cat is not None else (r[2] or r[1])
+        variants[r[0]] = Variant(code=r[1], name=name, category=r[3], rooms=r[4], min_rate=r[5], accessible=r[6],
                                  beds=r[7], baths=r[8], max_occupancy=r[9], sort_order=r[10])
     rank: dict[str, int] = {}
     if variants:
@@ -635,8 +723,8 @@ def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: da
     if not snaps:
         return None
     s = snaps[-1]
-    variants, families = snapshot_variants(conn, s.run_id, arrival)
     cat = catalogue(conn, stats)
+    variants, families = snapshot_variants(conn, s.run_id, arrival, cat)
     groups = group_rooms(variants, cat.reference_rates())
     cal = calendar_for_range(arrival, arrival + timedelta(days=1))
     flags = cal.night_flags(arrival)
@@ -669,7 +757,10 @@ def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: da
                 ],
             }
         )
-    others = [x for x in stats.snaps if x.arrival != arrival]
+    # Bands over every other night: the pool's sorted per-bucket lists are built once per
+    # Stats; only this night's own few values are taken out per request.
+    own_rooms = M.bucket_values((x.lead, x.rooms) for x in snaps)
+    own_rates = M.bucket_values((x.lead, x.min_rate) for x in snaps)
     return {
         "arrival_date": arrival.isoformat(),
         "label": fmt.date_long(arrival),
@@ -695,8 +786,8 @@ def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: da
         "curve": {
             "rooms": _curve_points(snaps, lambda x: x.rooms),
             "rate": _curve_points(snaps, lambda x: x.min_rate),
-            "rooms_band": M.band_by_bucket((x.lead, x.rooms) for x in others),
-            "rate_band": M.band_by_bucket((x.lead, x.min_rate) for x in others),
+            "rooms_band": M.band_from_buckets(stats.band_buckets("rooms"), own_rooms),
+            "rate_band": M.band_from_buckets(stats.band_buckets("min_rate"), own_rates),
         },
     }
 
@@ -840,7 +931,12 @@ def code_history(conn: sqlite3.Connection, codes: list[str]) -> list[Obs]:
     return out
 
 
-def _history_detail(history: list[Obs], today: date, curve_date: date | None) -> dict:
+def _history_detail(history: list[Obs], bands: dict[str, list[list[float]]], today: date,
+                    curve_date: date | None, what: str) -> dict:
+    """Upcoming nights plus the booking curve of one arrival date (`curve_date`, default the
+    first upcoming night). The date picker always lists the date being plotted: a requested
+    date with snapshots outside the upcoming list (e.g. a past night) is added to it, and one
+    with no snapshots of this room falls back to the default with a note."""
     latest: dict[date, Obs] = {}
     for o in history:
         latest[o.arrival] = o
@@ -850,25 +946,50 @@ def _history_detail(history: list[Obs], today: date, curve_date: date | None) ->
         if today <= d < today + timedelta(days=HORIZON_DAYS)
     ]
     curve_dates = [u["date"] for u in upcoming]
+    note = None
+    if curve_date is not None and curve_date.isoformat() not in curve_dates:
+        if curve_date in latest:
+            curve_dates = sorted(curve_dates + [curve_date.isoformat()])
+        else:
+            note = f"No snapshots of this {what} for {fmt.date_long(curve_date)}"
+            curve_date = None
     if curve_date is None and curve_dates:
         curve_date = date.fromisoformat(curve_dates[0])
+        if note:
+            note += f"; showing {fmt.date_long(curve_date)} instead."
+    elif note:
+        note += "."
     mine = [o for o in history if o.arrival == curve_date] if curve_date else []
-    others = [o for o in history if o.arrival != curve_date]
     return {
         "upcoming": upcoming,
         "curve_date": curve_date.isoformat() if curve_date else None,
         "curve_dates": curve_dates,
+        "curve_note": note,
         "curve": {
             "rooms": _curve_points(mine, lambda x: x.rooms),
             "rate": _curve_points(mine, lambda x: x.min_rate),
-            "rooms_band": M.band_by_bucket((o.lead, o.rooms) for o in others),
-            "rate_band": M.band_by_bucket((o.lead, o.min_rate) for o in others),
+            "rooms_band": M.band_from_buckets(bands["rooms"], M.bucket_values((o.lead, o.rooms) for o in mine)),
+            "rate_band": M.band_from_buckets(bands["rate"], M.bucket_values((o.lead, o.min_rate) for o in mine)),
         },
     }
 
 
-def cached_code_history(conn: sqlite3.Connection, stats: Stats, codes: list[str]) -> list[Obs]:
-    return stats.memo(("history", tuple(sorted(codes))), lambda: code_history(conn, codes))
+@dataclass
+class CodeHistory:
+    obs: list[Obs]
+    bands: dict[str, list[list[float]]]  # sorted per-bucket rooms/rate values over all of `obs`
+
+
+def cached_code_history(conn: sqlite3.Connection, stats: Stats, codes: list[str]) -> CodeHistory:
+    """A code set's whole history plus its band pool, built together (so the pool always holds
+    exactly the observations a page takes its own date out of) and memoized per Stats."""
+
+    def build() -> CodeHistory:
+        obs = code_history(conn, codes)
+        return CodeHistory(obs, {"rooms": M.bucket_values((o.lead, o.rooms) for o in obs),
+                                 "rate": M.bucket_values((o.lead, o.min_rate) for o in obs)})
+
+    return stats.memo(("history", tuple(sorted(codes))), build)
 
 
 def room_detail(conn: sqlite3.Connection, stats: Stats, slug: str, today: date, curve_date: date | None) -> dict | None:
@@ -877,7 +998,7 @@ def room_detail(conn: sqlite3.Connection, stats: Stats, slug: str, today: date, 
     if room is None:
         return None
     history = cached_code_history(conn, stats, room.codes)
-    detail = _history_detail(history, today, curve_date)
+    detail = _history_detail(history.obs, history.bands, today, curve_date, "room")
     detail.update(
         name=room.name,
         slug=room.slug,
@@ -904,7 +1025,8 @@ def suite_detail(conn: sqlite3.Connection, stats: Stats, code: str, today: date,
     if room is None:
         return None
     variant = next(v for v in room.variants if v.code == code)
-    detail = _history_detail(cached_code_history(conn, stats, [code]), today, curve_date)
+    history = cached_code_history(conn, stats, [code])
+    detail = _history_detail(history.obs, history.bands, today, curve_date, "suite code")
     detail.update(
         code=code,
         name=room.name,
@@ -923,11 +1045,22 @@ def suite_detail(conn: sqlite3.Connection, stats: Stats, code: str, today: date,
 # --------------------------------------------------------------------------- runs
 
 
-def runs(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
+def runs(conn: sqlite3.Connection, limit: int = 50, offset: int = 0) -> list[dict]:
     try:
-        return [dict(r) for r in conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,))]
+        rows = [dict(r) for r in conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
     except sqlite3.OperationalError:
         return []
+    for r in rows:  # Toronto local time for display; the stored UTC values stay as they are
+        r["started_local"] = local_time(r.get("started_at"))
+        r["finished_local"] = local_time(r.get("finished_at")) if r.get("finished_at") else None
+    return rows
+
+
+def runs_count(conn: sqlite3.Connection) -> int:
+    try:
+        return conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
 
 
 def last_completed_run(conn: sqlite3.Connection | None) -> dict | None:

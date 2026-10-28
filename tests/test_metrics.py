@@ -183,6 +183,55 @@ def test_band_by_bucket():
     assert band[0] is None
 
 
+def _remove(values, excluded):
+    rest = list(values)
+    for v in excluded:
+        rest.remove(v)
+    return rest
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_quantiles_excluding_match_brute_force(seed):
+    import random
+
+    rng = random.Random(seed)
+    # Small integer ranges force many ties, the case a value-based search can get wrong.
+    pool = sorted(float(rng.randint(0, rng.choice([3, 10, 400]))) for _ in range(rng.randint(1, 60)))
+    excluded = sorted(rng.sample(pool, rng.randint(0, len(pool))))
+    rest = _remove(pool, excluded)
+    for k in range(len(rest)):
+        assert m.kth_excluding(pool, excluded, k) == rest[k]
+    for p in (0.0, 0.1, 0.25, 0.5, 0.9, 1.0):
+        assert m.quantile_excluding(pool, excluded, p) == m.quantile(rest, p)
+
+
+def test_band_from_buckets_matches_band_by_bucket():
+    import random
+
+    rng = random.Random(7)
+    pairs = [(rng.randint(-3, 370), rng.choice([None, float(rng.randint(0, 50))])) for _ in range(3000)]
+    mine = pairs[:40]  # e.g. one arrival date's own snapshots
+    others = pairs[40:]
+    pool = m.bucket_values(pairs)
+    assert m.band_from_buckets(pool, m.bucket_values(mine)) == m.band_by_bucket(others)
+    assert m.band_from_buckets(pool) == m.band_by_bucket(pairs)
+    # Taking out everything leaves no band at all.
+    assert m.band_from_buckets(pool, pool) == [None] * len(m.LEAD_BUCKETS)
+
+
+def test_week_dates():
+    assert m.week_dates(2026, 1) == (date(2026, 1, 1), date(2026, 1, 7))
+    assert m.week_dates(2026, 51) == (date(2026, 12, 17), date(2026, 12, 23))
+    assert m.week_dates(2026, 52) == (date(2026, 12, 24), date(2026, 12, 31))
+    assert m.week_dates(2028, 52) == (date(2028, 12, 23), date(2028, 12, 31))
+    # Every night of the year falls in the week whose range contains it.
+    d = date(2028, 1, 1)
+    while d.year == 2028:
+        first, last = m.week_dates(2028, m.week_of_year(d))
+        assert first <= d <= last
+        d = date.fromordinal(d.toordinal() + 1)
+
+
 def test_quantile_breaks_and_classes():
     values = list(range(1, 11))
     breaks = m.quantile_breaks(values, 5)

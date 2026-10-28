@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% from "_macros.html" import nodata %}
+{% from "_macros.html" import nodata, pause_banner %}
 {% block title %}Plan · Great Wolf Tracker{% endblock %}
 {% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 <h1>When should we go?</h1>
+{{ pause_banner(pause, pause_message) }}
 <p class="lede">Every night for the next 12 months at Great Wolf Lodge Niagara, from the latest scrape of each date.
 Click a night for its room types and booking curve.</p>
 
@@ -12,7 +13,7 @@ Click a night for its room types and booking curve.</p>
 {% else %}
 <p class="caveat">
   Last scrape {{ status.last_scrape_local }} (Toronto) · {{ plan.nights_with_data }} of 365 nights captured ·
-  capacity estimate {{ status.capacity_est }} rooms{% if status.capacity_provisional %} ({{ status.capacity_caveat }}){% endif %}.
+  capacity estimate {{ status.capacity_text }}{% if status.capacity_provisional %} ({{ status.capacity_caveat }}){% endif %}.
 </p>
 
 <section class="calblock" aria-label="Calendar of upcoming nights">
@@ -74,12 +75,12 @@ Click a night for its room types and booking curve.</p>
 </section>
 
 <h2>Price against availability</h2>
-<p class="lede">One dot per upcoming night: the lowest nightly rate against rooms left (or pace). Diamonds are nights with no school the next morning.</p>
+<p class="lede">One dot per upcoming night: the lowest nightly rate against pace (how fast it's selling {{ pace_label }}), or rooms left. Diamonds are nights with no school the next morning.</p>
 <div id="scatter-block">
   <div class="toolbar">
     <span class="label">Y axis</span>
     <div class="seg" role="group" aria-label="Y axis">
-      <button type="button" data-ctl="y" value="rooms" aria-pressed="true">Rooms left</button><button type="button" data-ctl="y" value="pace" aria-pressed="false">Pace</button>
+      <button type="button" data-ctl="y" value="pace" aria-pressed="true">Pace</button><button type="button" data-ctl="y" value="rooms" aria-pressed="false">Rooms left</button>
     </div>
     <span class="label" id="days-ahead">Days ahead</span>
     <div class="seg" role="group" aria-labelledby="days-ahead">
@@ -90,7 +91,7 @@ Click a night for its room types and booking curve.</p>
       <button type="button" data-ctl="nights" value="all" aria-pressed="true">All</button><button type="button" data-ctl="nights" value="weekday" aria-pressed="false">Sun–Thu</button><button type="button" data-ctl="nights" value="weekend" aria-pressed="false">Fri–Sat</button>
     </div>
   </div>
-  <div id="scatter" class="chart tall" role="img" aria-label="Scatter of lowest nightly rate against rooms left for upcoming nights"></div>
+  <div id="scatter" class="chart tall" role="img" aria-label="Scatter of lowest nightly rate against pace or rooms left for upcoming nights"></div>
   <p class="chart-note"></p>
   <details class="tableview">
     <summary>Show as a table</summary>
@@ -153,7 +154,7 @@ Click a night for its room types and booking curve.</p>
 
 <p class="note">
   Pace is the percentile of % sold {{ pace_label }} (n/a until 20 snapshots exist at that days-out).
-  % sold is estimated against the most rooms ever seen available ({{ status.capacity_est }}).
+  % sold is estimated against the most rooms ever seen available ({{ status.capacity_text }}).
 </p>
 {% endif %}
 {% endblock %}

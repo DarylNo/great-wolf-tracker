@@ -12,6 +12,12 @@
   {% if demo %}
   <div class="banner" role="note"><div class="wrap">Synthetic demo data (made by <code>gwt demo-db</code>): not real Great Wolf numbers.</div></div>
   {% endif %}
+  {% if events_problem %}
+  <div class="banner warn" role="alert"><div class="wrap">
+    School calendar file <code>{{ events_problem.file }}</code> (GWT_EVENTS_FILE) can't be used: {{ events_problem.error }}.
+    Showing the bundled calendar instead until it's fixed.
+  </div></div>
+  {% endif %}
   <header class="top">
     <div class="wrap">
       <a class="brand" href="/">Great Wolf Tracker</a>

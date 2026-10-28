@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_left, bisect_right
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Iterable, Protocol, Sequence, TypeVar
 from zoneinfo import ZoneInfo
@@ -236,7 +236,11 @@ def quantile(sorted_values: Sequence[float], p: float) -> float | None:
 def band_by_bucket(
     pairs: Iterable[tuple[int | None, float | None]], min_n: int = 5
 ) -> list[dict | None]:
-    """Median and 10th–90th percentile of values per lead bucket (None where n < min_n)."""
+    """Median and 10th–90th percentile of values per lead bucket (None where n < min_n).
+
+    The straightforward version; pages use band_from_buckets, which gives the same numbers
+    from pre-sorted per-bucket lists and can leave one date's values out without re-sorting.
+    """
     buckets: list[list[float]] = [[] for _ in LEAD_BUCKETS]
     for lead, value in pairs:
         b = lead_bucket(lead)
@@ -257,6 +261,81 @@ def band_by_bucket(
                 "p50": quantile(values, 0.50),
                 "p90": quantile(values, 0.90),
                 "n": len(values),
+            }
+        )
+    return out
+
+
+def bucket_values(pairs: Iterable[tuple[int | None, float | None]]) -> list[list[float]]:
+    """Values per lead bucket, each list sorted: the input band_from_buckets works from."""
+    buckets: list[list[float]] = [[] for _ in LEAD_BUCKETS]
+    for lead, value in pairs:
+        b = lead_bucket(lead)
+        if b is not None and value is not None:
+            buckets[b].append(float(value))
+    for values in buckets:
+        values.sort()
+    return buckets
+
+
+def kth_excluding(all_sorted: Sequence[float], excluded_sorted: Sequence[float], k: int) -> float:
+    """The k-th smallest (0-based) value of the multiset `all_sorted` minus `excluded_sorted`.
+
+    `excluded_sorted` must be a sub-multiset of `all_sorted` (both sorted). Binary search over
+    `all_sorted`: O(log² n), no copying, so leaving one date out of a large pool is cheap.
+    """
+    lo, hi = 0, len(all_sorted) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        v = all_sorted[mid]
+        if bisect_right(all_sorted, v) - bisect_right(excluded_sorted, v) >= k + 1:
+            hi = mid
+        else:
+            lo = mid + 1
+    return all_sorted[lo]
+
+
+def quantile_excluding(all_sorted: Sequence[float], excluded_sorted: Sequence[float], p: float) -> float | None:
+    """`quantile(sorted(all - excluded), p)`, computed without building the difference."""
+    n = len(all_sorted) - len(excluded_sorted)
+    if n <= 0:
+        return None
+    if n == 1:
+        return float(kth_excluding(all_sorted, excluded_sorted, 0))
+    pos = min(max(p, 0.0), 1.0) * (n - 1)
+    lo, hi = math.floor(pos), math.ceil(pos)
+    a = kth_excluding(all_sorted, excluded_sorted, lo)
+    b = a if hi == lo else kth_excluding(all_sorted, excluded_sorted, hi)
+    return a + (b - a) * (pos - lo)
+
+
+def band_from_buckets(
+    all_buckets: Sequence[Sequence[float]],
+    excluded: Sequence[Sequence[float]] | None = None,
+    min_n: int = 5,
+) -> list[dict | None]:
+    """Same result as band_by_bucket over every value in `all_buckets` except `excluded`.
+
+    Both come from bucket_values(); `excluded` (e.g. the page's own date) must be part of
+    `all_buckets`. The pool's sorted lists are built once per database version and reused.
+    """
+    out: list[dict | None] = []
+    for i, ((lo, hi), label) in enumerate(zip(LEAD_BUCKETS, BUCKET_LABELS)):
+        values = all_buckets[i]
+        skip = excluded[i] if excluded is not None else ()
+        n = len(values) - len(skip)
+        if n < min_n:
+            out.append(None)
+            continue
+        out.append(
+            {
+                "bucket": label,
+                "lead_lo": lo,
+                "lead_hi": hi,
+                "p10": quantile_excluding(values, skip, 0.10),
+                "p50": quantile_excluding(values, skip, 0.50),
+                "p90": quantile_excluding(values, skip, 0.90),
+                "n": n,
             }
         )
     return out
@@ -326,3 +405,10 @@ def week_of_year(d: date) -> int:
 def week_position(d: date) -> float:
     """Continuous x position of a night on a week-of-year axis (week n is centred on n)."""
     return 1 + (d.timetuple().tm_yday - 4) / 7
+
+
+def week_dates(year: int, week: int) -> tuple[date, date]:
+    """First and last night of week_of_year `week` in `year` (week 52 runs to Dec 31)."""
+    first = date(year, 1, 1) + timedelta(days=(week - 1) * 7)
+    last = date(year, 12, 31) if week == 52 else first + timedelta(days=6)
+    return first, last

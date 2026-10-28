@@ -1,4 +1,4 @@
-"""Command-line entry point: `python -m gwt sweep|suites|serve|demo-db`."""
+"""Command-line entry point: `python -m gwt sweep|suites|serve|unblock|backup|demo-db`."""
 
 from __future__ import annotations
 
@@ -10,11 +10,13 @@ from pathlib import Path
 
 from gwt import db
 from gwt.locking import SweepBusy
-from gwt.sweep import SweepAborted, execute_sweep
+from gwt.sweep import SweepAborted, SweepPaused, execute_sweep
 
 EXIT_ABORTED = 1
 EXIT_USAGE = 2
 EXIT_BUSY = 3
+EXIT_PAUSED = 4
+EXIT_INTERRUPTED = 130  # Ctrl-C, as shells report it
 
 
 def _default_db() -> str:
@@ -28,14 +30,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     sweep = sub.add_parser("sweep", help="fetch availability for upcoming arrival dates")
     sweep.add_argument("--days", type=int, default=365, help="number of arrival dates from --start (default 365)")
-    sweep.add_argument("--start", type=date.fromisoformat, default=None, help="first arrival date, YYYY-MM-DD (default: today UTC)")
+    sweep.add_argument("--start", type=date.fromisoformat, default=None,
+                       help="first arrival date, YYYY-MM-DD (default: today in Toronto)")
     sweep.add_argument("--db", default=_default_db(), help=db_help)
     sweep.add_argument(
         "--run-id",
         default=None,
-        help="run identifier used for resume; re-using it skips dates already captured (default: today's UTC date)",
+        help="run identifier used for resume; re-using it skips dates already captured (default: today's date in Toronto)",
     )
+    sweep.add_argument("--force", action="store_true",
+                       help="sweep even though collection is paused after a 403 (prefer `gwt unblock` after reviewing)")
     sweep.add_argument("-v", "--verbose", action="store_true")
+
+    unblock = sub.add_parser("unblock", help="resume scheduled sweeps after reviewing a blocked (403) run")
+    unblock.add_argument("--db", default=_default_db(), help=db_help)
+
+    backup = sub.add_parser("backup", help="consistent copy of the database (safe while it's in use)")
+    backup.add_argument("--out", required=True, help="where to write the copy")
+    backup.add_argument("--db", default=_default_db(), help=db_help)
+    backup.add_argument("--force", action="store_true", help="overwrite an existing file at --out")
 
     suites = sub.add_parser("suites", help="show stored suite availability for one arrival date")
     suites.add_argument("--date", type=date.fromisoformat, required=True, help="arrival date, YYYY-MM-DD")
@@ -92,6 +105,45 @@ def cmd_demo_db(args: argparse.Namespace) -> int:
         out, result["sweeps"], result["snapshots"], result["suite_snapshots"],
     )
     return 0
+
+
+def cmd_unblock(args: argparse.Namespace, out=print) -> int:
+    path = Path(args.db)
+    if not path.exists():
+        out(f"No database at {path}.")
+        return EXIT_USAGE
+    conn = db.connect(path)
+    try:
+        cleared = db.acknowledge_block(conn)
+    finally:
+        conn.close()
+    if cleared is None:
+        out("Collection is not paused; nothing to unblock.")
+        return 0
+    out(f"Unblocked. The 403 on {cleared['date']} (run {cleared['run_id']}) was: {cleared['message']}")
+    out("Scheduled sweeps will run again at their next time.")
+    return 0
+
+
+def cmd_backup(args: argparse.Namespace, out=print) -> int:
+    src, dst = Path(args.db), Path(args.out)
+    if dst.resolve() == src.resolve():
+        out("--out must be a different file from the database.")
+        return EXIT_USAGE
+    if dst.exists():
+        if not args.force:
+            out(f"{dst} already exists (use --force to overwrite it).")
+            return EXIT_USAGE
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{dst}{suffix}").unlink(missing_ok=True)
+    try:
+        info = db.backup(src, dst)
+    except FileNotFoundError as exc:
+        out(str(exc))
+        return EXIT_USAGE
+    counts = ", ".join(f"{k} {v}" for k, v in info.items() if k not in ("quick_check", "bytes"))
+    out(f"Backed up {src} to {dst} ({info['bytes'] / 1e6:.1f} MB; {counts}); integrity check: {info['quick_check']}")
+    return 0 if info["quick_check"] == "ok" else EXIT_ABORTED
 
 
 def _fmt_rate(value: float | None) -> str:
@@ -187,13 +239,22 @@ def main(argv: list[str] | None = None) -> int:
             logging.error("--days must be >= 1")
             return EXIT_USAGE
         try:
-            result = execute_sweep(args.db, days=args.days, start=args.start, run_id=args.run_id, trigger="cli")
+            result = execute_sweep(args.db, days=args.days, start=args.start, run_id=args.run_id, trigger="cli",
+                                   force=args.force)
+        except SweepPaused as exc:
+            logging.error("%s Last blocked run %s: %s", exc, exc.pause["run_id"], exc.pause["message"])
+            logging.error("Refusing to sweep. Review, then run `python -m gwt unblock` (or pass --force).")
+            return EXIT_PAUSED
         except SweepBusy as exc:
             logging.error("%s", exc)
             return EXIT_BUSY
         except SweepAborted as exc:
             logging.error("%s", exc)
             return EXIT_ABORTED
+        except KeyboardInterrupt:
+            logging.error("interrupted; recorded as 'interrupted' (sweeping again with the same run ID, "
+                          "by default today's date, resumes where it stopped)")
+            return EXIT_INTERRUPTED
         logging.info(
             "run %s complete: fetched=%d skipped=%d failed_dates=%d",
             result.run_id,
@@ -208,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args)
     if args.command == "demo-db":
         return cmd_demo_db(args)
+    if args.command == "unblock":
+        return cmd_unblock(args)
+    if args.command == "backup":
+        return cmd_backup(args)
     return EXIT_USAGE
 
 

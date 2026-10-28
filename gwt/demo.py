@@ -3,7 +3,7 @@
 Clearly synthetic but shaped like the real thing, so the dashboard can be developed and
 reviewed without live data:
 
-- ~60 weekly full sweeps (Sundays 03:17, 365 days) plus daily 30-day sweeps (05:43),
+- ~60 weekly full sweeps (Sundays 03:17, 365 days) plus daily 38-day sweeps (05:43),
   scraped_at in UTC exactly like the collector writes it;
 - 27 suite codes grouped into 17 rooms (accessible / bedding variants share a name);
 - rooms decline toward arrival; Fri/Sat nights, summer, and school-break / holiday nights
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from gwt import db
+from gwt.config import DEFAULT_DAILY_DAYS
 from gwt.events import ClosureCalendar
 from gwt.metrics import LODGE_TZ
 
@@ -165,7 +166,7 @@ def build_demo_db(
     now: datetime | None = None,
     seed: int = 7,
     full_days: int = 365,
-    daily_days: int = 30,
+    daily_days: int = DEFAULT_DAILY_DAYS,
     progress: Callable[[str], None] | None = None,
 ) -> dict:
     """Write a fresh synthetic database at `out` (which must not exist). Returns counts."""
@@ -227,7 +228,7 @@ def build_demo_db(
 
     for n_sweep, (start, trigger, days) in enumerate(sweeps):
         start_utc = start.astimezone(timezone.utc)
-        run_id = start_utc.date().isoformat()
+        run_id = start.date().isoformat()  # like the collector: the sweep's date in Toronto
         scraped = start_utc
         for i in range(days):
             arrival = start.date() + timedelta(days=i)

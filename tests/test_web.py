@@ -1,5 +1,6 @@
 """Dashboard pages and JSON API on a demo DB, a single-snapshot DB, and an empty/missing DB."""
 
+import json
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -66,16 +67,27 @@ def test_plan_page(client):
     html = r.text
     assert "When should we go?" in html
     assert "Synthetic demo data" in html  # demo banner
-    assert "October 2026" in html and "September 2027" in html  # 12 wall-calendar months
-    assert html.count('class="month"') == 12
+    # Today's month through the month of the 365th night: 13 wall-calendar months, the last partial.
+    assert "October 2026" in html and "October 2027" in html
+    assert html.count('class="month"') == 13
     assert 'id="m-price" value="price" checked' in html
     assert "Far-out dates haven&#39;t been booked yet" in html or "Far-out dates haven't been booked yet" in html
     assert "Cheapest upcoming nights" in html and "Filling fastest" in html
     assert "ties go to the night with more rooms left" in html
-    assert "most rooms sold in the last 7 days first" in html
+    assert "Nights that sold rooms in the last 7 days come first, most sold first" in html
     assert 'id="scatter"' in html and 'id="scatter-data"' in html
     assert "/static/plotly.min.js" in html and "cdn." not in html
     assert not re.search(r"demand index", html, re.I)
+
+
+def test_calendar_has_a_cell_for_every_one_of_the_365_nights(client):
+    html = client.get("/").text
+    calendar = html.split('<div class="months">')[1].split("</section>")[0]
+    linked = re.findall(r'<a class="day[^"]*"\s+href="/date/(\d{4}-\d{2}-\d{2})"', calendar)
+    expected = [(TODAY + timedelta(days=i)).isoformat() for i in range(365)]
+    assert linked == expected
+    # The 13th month (Oct 2027) is partial: the 27th is the last night, the rest are out of range.
+    assert '<span class="day out"><span class="n">28</span>' in calendar
 
 
 def test_plan_metric_toggle_param(client):
@@ -122,8 +134,11 @@ def test_api_plan(client):
     assert all(not n["sold_out"] for n in cheapest)
     filling = body["filling_fastest"]["nights"]
     assert filling and all(n["date"] < (TODAY + timedelta(days=60)).isoformat() for n in filling)
-    with_pickup = [n["pickup_7d"] for n in filling if n["pickup_7d"] is not None]
-    assert with_pickup == sorted(with_pickup, reverse=True)
+    selling = [n for n in filling if (n["pickup_7d"] or 0) > 0]
+    assert filling[:len(selling)] == selling  # nights that sold rooms come first...
+    assert [n["pickup_7d"] for n in selling] == sorted((n["pickup_7d"] for n in selling), reverse=True)
+    rest = filling[len(selling):]
+    assert [n["pace_pct"] for n in rest] == sorted((n["pace_pct"] for n in rest), reverse=True)  # ...then pace
     paced = [n for n in body["nights"] if n["pace_pct"] is not None]
     assert paced and all(0 <= n["pace_pct"] <= 100 for n in paced)
     missing = [n for n in body["nights"] if not n["has_data"]]
@@ -379,3 +394,244 @@ def test_matrix_step_bins():
     assert data.matrix_step(20, 100) == 4
     assert data.matrix_step(1, 100) == 4
     assert data.matrix_step(3, None) == 2
+
+
+# --------------------------------------------------------------------------- Filling fastest rule
+
+
+def _n(day: int, pickup, pace, sold_out=False, has_data=True) -> dict:
+    return {"date": f"2026-11-{day:02d}", "has_data": has_data, "sold_out": sold_out, "pickup_7d": pickup,
+            "pace_pct": pace}
+
+
+def test_filling_fastest_puts_nights_that_sold_rooms_first_then_pace():
+    nights = [
+        _n(1, 3, 10.0), _n(2, 0, 95.0), _n(3, None, 80.0), _n(4, 7, None), _n(5, -2, 99.0),
+        _n(6, 3, 60.0), _n(7, None, None), _n(8, 9, 50.0, sold_out=True), _n(9, None, 20.0, has_data=False),
+    ]
+    order = [n["date"][-2:] for n in data.filling_fastest(nights)]
+    # pickup > 0 by pickup (ties: faster pace first), then everything else by pace;
+    # sold-out, no-data and no-signal nights are left out.
+    assert order == ["04", "06", "01", "05", "02", "03"]
+
+
+# --------------------------------------------------------------------------- banners: pause (B), events file (G)
+
+
+def _block(path: Path) -> None:
+    conn = db.connect(path)
+    run = db.start_run(conn, run_id="2026-10-25", trigger="schedule:weekly", started_at="2026-10-25T07:17:00+00:00",
+                       start_date="2026-10-25", days=365, skipped=0)
+    db.update_run(conn, run, status="aborted", blocked=1, finished_at="2026-10-25T07:17:05+00:00",
+                  message="2026-10-25: HTTP 403 - looks blocked; stopping (do not evade)")
+    conn.close()
+
+
+def test_pause_banner_on_plan_and_runs_until_unblocked(single_db):
+    _block(single_db)
+    with make_client(single_db) as c:
+        for path in ("/", "/runs"):
+            html = c.get(path).text
+            assert "Collection paused: blocked (403) on 2026-10-25, run <code>gwt unblock</code> after reviewing." in html
+        assert "Paused: scheduled sweeps skip until" in c.get("/runs").text
+        health = c.get("/healthz").json()
+        assert health["collection_paused"]["run_id"] == "2026-10-25"
+        assert c.get("/api/runs").json()["collection_paused"]["date"] == "2026-10-25"
+    conn = db.connect(single_db)
+    db.acknowledge_block(conn)
+    conn.close()
+    with make_client(single_db) as c:
+        assert "Collection paused" not in c.get("/").text
+        assert c.get("/healthz").json()["collection_paused"] is None
+
+
+@pytest.mark.parametrize("path", ["/", "/seasonality", "/date/2026-11-21", "/suites", "/runs", "/healthz"])
+def test_bad_events_file_falls_back_with_a_banner(demo_db, tmp_path, monkeypatch, path):
+    bad = tmp_path / "calendar_events.yaml"
+    bad.write_text("events:\n  - {region: ON, name: X, start: 2027-01-01, end: 2027-01-01, source: s, official: true}\n")
+    monkeypatch.setenv("GWT_EVENTS_FILE", str(bad))
+    with make_client(demo_db) as c:
+        r = c.get(path)
+    assert r.status_code == 200
+    if path == "/healthz":
+        assert r.json()["events_problem"]["file"] == str(bad)
+        return
+    assert f"School calendar file <code>{bad}</code>" in r.text and "quote it" in r.text
+    if path == "/":  # the bundled calendar is still used
+        assert "NY: Thanksgiving recess" in r.text
+
+
+# --------------------------------------------------------------------------- Runs page
+
+
+def test_runs_page_paginates_and_shows_toronto_time(tmp_path):
+    path = tmp_path / "runs.db"
+    conn = db.connect(path)
+    for i in range(120):
+        day = date(2026, 6, 1) + timedelta(days=i)
+        run = db.start_run(conn, run_id=day.isoformat(), trigger="schedule:daily",
+                           started_at=f"{day.isoformat()}T09:43:00+00:00", start_date=day.isoformat(), days=38, skipped=0)
+        db.update_run(conn, run, status="completed", fetched=38, finished_at=f"{day.isoformat()}T09:46:00+00:00")
+    conn.close()
+    with make_client(path) as c:
+        first = c.get("/runs").text
+        assert first.count("<tr>") - 1 == 50  # header row + 50 runs
+        assert "Page 1 of 3 · 120 runs" in first and 'href="?page=2"' in first
+        newest = (date(2026, 6, 1) + timedelta(days=119))
+        # 09:43 UTC is 05:43 in Toronto (EDT); the UTC value stays in the tooltip.
+        assert f"{data.fmt.date_long(newest)} 5:43 AM" in first
+        assert f'title="{newest.isoformat()}T09:43:00+00:00 UTC"' in first
+        last = c.get("/runs?page=3").text
+        assert last.count("<tr>") - 1 == 20 and 'href="?page=2"' in last and "?page=4" not in last
+        assert c.get("/runs?page=99").status_code == 200  # clamps to the last page
+        api = c.get("/api/runs?page=2").json()
+        assert api["page"] == 2 and api["total"] == 120 and len(api["runs"]) == 50
+        assert api["runs"][0]["started_local"].endswith("5:43 AM")
+
+
+def test_runs_badges_for_new_statuses(single_db):
+    conn = db.connect(single_db)
+    for status in ("rate_limited", "interrupted"):
+        run = db.start_run(conn, run_id="x", trigger="cli", started_at="2026-10-28T10:00:00+00:00",
+                           start_date="2026-10-28", days=5, skipped=0)
+        db.update_run(conn, run, status=status, finished_at="2026-10-28T10:01:00+00:00")
+    conn.close()
+    with make_client(single_db) as c:
+        html = c.get("/runs").text
+    assert '<span class="badge bad">rate-limited</span>' in html
+    assert '<span class="badge muted">interrupted</span>' in html
+
+
+# --------------------------------------------------------------------------- capacity wording
+
+
+def test_no_capacity_estimate_reads_as_text_not_none(tmp_path, sample_payload):
+    for s in sample_payload["suites"]:
+        s["availableRoomCount"] = 0  # every scrape sold out: no capacity estimate possible
+    path = tmp_path / "soldout.db"
+    conn = db.connect(path)
+    db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00",
+                     parse_availability(sample_payload, TODAY + timedelta(days=3)))
+    conn.close()
+    with make_client(path) as c:
+        for page in ("/", "/seasonality"):
+            html = c.get(page).text
+            assert "None" not in html
+        assert "capacity estimate not available yet" in c.get("/").text
+
+
+# --------------------------------------------------------------------------- room / suite ?date=
+
+
+def test_room_page_date_param_and_picker_agree(client):
+    # A past night with snapshots (not in the upcoming list) is added to the picker and plotted.
+    past = (TODAY - timedelta(days=3)).isoformat()
+    html = client.get(f"/rooms/family-suite?date={past}").text
+    assert f'<option value="{past}" selected' in html
+    body = client.get(f"/api/rooms/family-suite?date={past}").json()
+    assert body["curve_date"] == past and past in body["curve_dates"] and body["curve"]["rooms"]
+    # A night with no snapshots of this room: fall back to the first upcoming night, say so.
+    html = client.get("/rooms/family-suite?date=2031-01-01").text
+    assert "No snapshots of this room for Wed, Jan 1, 2031; showing" in html
+    selected = re.findall(r'<option value="([^"]+)" selected', html)
+    assert selected == [TODAY.isoformat()]
+    body = client.get("/api/suites/SFSSB?date=2031-01-01").json()
+    assert body["curve_date"] == TODAY.isoformat() and body["curve_date"] in body["curve_dates"]
+    assert "No snapshots of this suite code" in body["curve_note"]
+    assert client.get(f"/api/suites/SFSSB?date={TODAY.isoformat()}").json()["curve_note"] is None
+
+
+# --------------------------------------------------------------------------- renamed suite codes
+
+
+def test_a_renamed_suite_stays_one_room_everywhere(tmp_path, sample_payload):
+    """Great Wolf renames TWLFD between two scrapes: the old snapshot rows still carry the old
+    name, but every page groups the code under its current catalogue name."""
+    path = tmp_path / "renamed.db"
+    conn = db.connect(path)
+    early = TODAY + timedelta(days=3)
+    db.save_snapshot(conn, "2026-10-27", "2026-10-27T09:43:00+00:00", parse_availability(sample_payload, early))
+    renamed = json.loads(json.dumps(sample_payload))
+    for s in renamed["suites"]:
+        if s["suiteCode"] == "TWLFD":
+            s["suiteBrand"] = "Wolf Den Bunk Suite"
+    db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00",
+                     parse_availability(renamed, TODAY + timedelta(days=4)))
+    conn.close()
+    with make_client(path) as c:
+        # The early night's latest snapshot says "Wolf Den Suite"; it links to the current room.
+        detail = c.get(f"/api/dates/{early.isoformat()}").json()
+        names = [r["name"] for r in detail["rooms"]]
+        assert "Wolf Den Bunk Suite" in names and "Wolf Den Suite" not in names
+        slug = next(r["slug"] for r in detail["rooms"] if r["name"] == "Wolf Den Bunk Suite")
+        assert c.get(f"/rooms/{slug}").status_code == 200
+        html = c.get(f"/date/{early.isoformat()}").text
+        assert f'href="/rooms/{slug}?date={early.isoformat()}"' in html
+        # The matrix row has data for both nights, not "no data" for the old-name night.
+        matrix = c.get("/api/rooms/matrix?window=30").json()
+        row = next(r for r in matrix["rooms"] if r["name"] == "Wolf Den Bunk Suite")
+        assert row["rooms_left"][3] == 5 and row["rooms_left"][4] == 5
+        assert not any(r["name"] == "Wolf Den Suite" for r in matrix["rooms"])
+        night = next(n for n in c.get("/api/plan").json()["nights"] if n["date"] == early.isoformat())
+        assert night["room_types"] == 5
+
+
+# --------------------------------------------------------------------------- seasonality week labels
+
+
+def test_week_labels_cover_the_whole_year():
+    assert data.week_label(2026, 1) == "Jan 1–Jan 7"
+    assert data.week_label(2026, 52) == "Dec 24–Dec 31"  # 8 nights: the 365th folds into week 52
+    assert data.week_label(2028, 52) == "Dec 23–Dec 31"  # leap year: 9 nights
+    assert data.week_label(2028, 9) == "Feb 26–Mar 3"
+
+
+def test_api_seasonality_has_week_labels(client):
+    body = client.get("/api/seasonality").json()
+    for y in body["years"]:
+        labels = body["week_labels"][str(y)]
+        assert len(labels) == 52 and labels[-1].endswith("Dec 31")
+
+
+# --------------------------------------------------------------------------- Stats rebuild throttle (H)
+
+
+def test_stats_rebuild_is_throttled_while_a_sweep_runs(single_db, sample_payload):
+    clock = {"t": 1000.0}
+    key = f"throttle:{single_db}"
+    conn = db.connect(single_db)
+    first = data.get_stats(conn, key, clock=lambda: clock["t"])
+    run = db.start_run(conn, run_id="2026-10-29", trigger="schedule:daily", started_at="2026-10-29T09:43:00+00:00",
+                       start_date="2026-10-29", days=38, skipped=0)
+    db.save_snapshot(conn, "2026-10-29", "2026-10-29T09:43:05+00:00",
+                     parse_availability(sample_payload, TODAY + timedelta(days=5)))
+    clock["t"] += 30
+    assert data.get_stats(conn, key, clock=lambda: clock["t"]) is first  # sweep running, < 60 s old
+    clock["t"] += 31
+    second = data.get_stats(conn, key, clock=lambda: clock["t"])
+    assert second is not first and len(second.snaps) == 2  # > 60 s: rebuilt
+    db.save_snapshot(conn, "2026-10-29", "2026-10-29T09:43:09+00:00",
+                     parse_availability(sample_payload, TODAY + timedelta(days=6)))
+    db.update_run(conn, run, status="completed", finished_at="2026-10-29T09:44:00+00:00")
+    third = data.get_stats(conn, key, clock=lambda: clock["t"])
+    assert third is not second and len(third.snaps) == 3  # sweep done: rebuilt at once
+    assert data.get_stats(conn, key, clock=lambda: clock["t"]) is third  # unchanged: cached
+    conn.close()
+
+
+def test_date_page_bands_match_a_brute_force_recompute(demo_db):
+    conn = db.connect_readonly(demo_db)
+    try:
+        stats = data.get_stats(conn, str(demo_db.resolve()))
+        night = date(2026, 11, 21)
+        detail = data.date_detail(conn, stats, night, TODAY)
+        others = [s for s in stats.snaps if s.arrival != night]
+        assert detail["curve"]["rooms_band"] == data.M.band_by_bucket((s.lead, s.rooms) for s in others)
+        assert detail["curve"]["rate_band"] == data.M.band_by_bucket((s.lead, s.min_rate) for s in others)
+        room = data.room_detail(conn, stats, "family-suite", TODAY, night)
+        history = data.cached_code_history(conn, stats, room["codes"]).obs
+        rest = [o for o in history if o.arrival != night]
+        assert room["curve"]["rooms_band"] == data.M.band_by_bucket((o.lead, o.rooms) for o in rest)
+        assert room["curve"]["rate_band"] == data.M.band_by_bucket((o.lead, o.min_rate) for o in rest)
+    finally:
+        conn.close()

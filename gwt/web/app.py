@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import sqlite3
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime
 from importlib import metadata, resources
@@ -12,13 +14,13 @@ from pathlib import Path
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
 
-from gwt import __version__, db
+from gwt import __version__, db, events
 from gwt import metrics as M
 from gwt.config import Settings
 from gwt.scheduler import build_scheduler, describe
@@ -29,6 +31,8 @@ log = logging.getLogger("gwt.web")
 WEB_DIR = Path(__file__).parent
 TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
+MIGRATION_LOCK_WAIT = 10.0  # seconds web startup waits for a running sweep's lock before migrating anyway
+RUNS_PER_PAGE = 50
 
 
 def plotly_js_path() -> Path | None:
@@ -85,11 +89,15 @@ def create_app(
     today_fn = today or (lambda: datetime.now(tz).date())
     stats_key = str(settings.db_path.resolve())
 
+    stop = threading.Event()  # set on shutdown: a running sweep stops between dates
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Migrate before serving: the server doesn't accept requests until this returns.
         if settings.db_path.exists():
-            db.connect(settings.db_path).close()  # apply schema migrations / new indexes once
-        scheduler = build_scheduler(settings.schedule, settings.db_path) if run_scheduler else None
+            outcome = await asyncio.to_thread(db.migrate_file, settings.db_path, MIGRATION_LOCK_WAIT)
+            log.info("database %s: %s", settings.db_path, outcome)
+        scheduler = build_scheduler(settings.schedule, settings.db_path, stop=stop) if run_scheduler else None
         if scheduler:
             scheduler.start()
             for job in describe(scheduler):
@@ -100,8 +108,11 @@ def create_app(
         try:
             yield
         finally:
+            stop.set()
             if scheduler:
-                scheduler.shutdown(wait=False)
+                # The running sweep (if any) sees `stop`, records itself as interrupted and
+                # returns; wait for that so the container's stop grace period covers it.
+                await asyncio.to_thread(scheduler.shutdown, True)
 
     app = FastAPI(title="Great Wolf Tracker", version=__version__, lifespan=lifespan)
     app.state.scheduler = None
@@ -138,7 +149,15 @@ def create_app(
         return data.get_stats(conn, stats_key, settings.final_fill_max_lead)
 
     def page(request: Request, template: str, conn, status_code: int = 200, **ctx) -> HTMLResponse:
-        base = {"active": template, "demo": data.is_demo(conn), "today": today_fn()}
+        pause = db.collection_pause(conn) if conn is not None else None
+        base = {
+            "active": template,
+            "demo": data.is_demo(conn),
+            "today": today_fn(),
+            "pause": pause,
+            "pause_message": db.pause_message(pause) if pause else None,
+            "events_problem": events.events_problem(),
+        }
         return templates.TemplateResponse(request, template, {**base, **ctx}, status_code=status_code)
 
     # ------------------------------------------------------------------ HTML pages
@@ -210,11 +229,14 @@ def create_app(
                         code=code, detail=detail)
 
     @app.get("/runs", response_class=HTMLResponse)
-    def runs_page(request: Request):
+    def runs_page(request: Request, page_no: int = Query(1, alias="page", ge=1)):
         with open_db() as conn:
-            runs = data.runs(conn) if conn is not None else []
+            total = data.runs_count(conn) if conn is not None else 0
+            pages = max(1, -(-total // RUNS_PER_PAGE))
+            page_no = min(page_no, pages)
+            runs = data.runs(conn, limit=RUNS_PER_PAGE, offset=(page_no - 1) * RUNS_PER_PAGE) if conn is not None else []
             return page(request, "runs.html", conn, has_data=bool(runs), runs=runs, schedule=settings.schedule,
-                        jobs=describe(app.state.scheduler))
+                        jobs=describe(app.state.scheduler), page_no=page_no, pages=pages, total_runs=total)
 
     # ------------------------------------------------------------------ JSON API
 
@@ -311,12 +333,15 @@ def create_app(
             return {"has_data": True, **detail}
 
     @app.get("/api/runs")
-    def api_runs():
+    def api_runs(page_no: int = Query(1, alias="page", ge=1)):
         with open_db() as conn:
-            runs = data.runs(conn) if conn is not None else []
-            return {"runs": runs, "scheduler": {"enabled": app.state.scheduler is not None,
-                                                 "timezone": settings.schedule.timezone,
-                                                 "jobs": describe(app.state.scheduler)}}
+            total = data.runs_count(conn) if conn is not None else 0
+            runs = data.runs(conn, limit=RUNS_PER_PAGE, offset=(page_no - 1) * RUNS_PER_PAGE) if conn is not None else []
+            return {"runs": runs, "page": page_no, "per_page": RUNS_PER_PAGE, "total": total,
+                    "collection_paused": db.collection_pause(conn) if conn is not None else None,
+                    "scheduler": {"enabled": app.state.scheduler is not None,
+                                  "timezone": settings.schedule.timezone,
+                                  "jobs": describe(app.state.scheduler)}}
 
     @app.get("/healthz")
     def healthz():
@@ -328,6 +353,8 @@ def create_app(
                 "has_data": data.has_data(conn),
                 "synthetic_demo": data.is_demo(conn),
                 "last_completed_run": data.last_completed_run(conn),
+                "collection_paused": db.collection_pause(conn) if conn is not None else None,
+                "events_problem": events.events_problem(),
                 "scheduler_running": bool(app.state.scheduler and app.state.scheduler.running),
             }
 

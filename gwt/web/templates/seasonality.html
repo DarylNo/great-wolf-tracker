@@ -15,7 +15,7 @@ current prices say about the next 52 weeks.</p>
 A night counts once its last scrape is within {{ status.final_fill_max_lead }} days of arrival, so this fills in one night per day.</p>
 {% if season.final_fill_nights == 0 %}
   <div class="empty"><strong>No final-fill data yet</strong>
-    0 nights have been scraped within {{ status.final_fill_max_lead }} days of arrival so far. The daily 30-day sweep adds one each day.</div>
+    0 nights have been scraped within {{ status.final_fill_max_lead }} days of arrival so far. The daily sweep adds one each day.</div>
 {% else %}
   <p class="caveat">{{ season.final_fill_nights }} nights so far{% if status.capacity_provisional %} · {{ status.capacity_caveat }}{% endif %}.</p>
   <div class="grid2">
@@ -29,7 +29,7 @@ A night counts once its last scrape is within {{ status.final_fill_max_lead }} d
     </figure>
   </div>
   <p class="note">Shaded: nights with no school the next morning (Ontario or New York breaks, PA days and public holidays) in the years shown.
-  % sold is estimated against the most rooms ever seen available ({{ status.capacity_est }}).</p>
+  % sold is estimated against the most rooms ever seen available ({{ status.capacity_text }}).</p>
   <details class="tableview">
     <summary>Show as a table</summary>
     <div class="tablewrap">

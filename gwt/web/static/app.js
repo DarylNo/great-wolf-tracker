@@ -216,9 +216,13 @@
   }
 
   GWT.planScatter = function (spec) {
-    const state = { y: "rooms", window: 90, nights: "all" };
+    // Pace is the default y axis; until any night has a pace (20+ snapshots at its days-out),
+    // fall back to rooms left so the chart isn't empty.
+    const anyPace = spec.points.some((p) => p.pace != null && p.price != null);
+    const state = { y: anyPace ? "pace" : "rooms", window: 90, nights: "all" };
     const root = document.getElementById(spec.root);
     if (!root) return;
+    root.querySelectorAll('[data-ctl="y"]').forEach((b) => b.setAttribute("aria-pressed", String(b.value === state.y)));
     root.querySelectorAll("[data-ctl]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const ctl = btn.getAttribute("data-ctl");
@@ -287,12 +291,18 @@
         xaxis: { title: { text: "Lowest nightly rate" }, tickprefix: "$", range: pts.length ? pad(xShown, 0.04) : undefined },
         yaxis: { title: { text: yTitle }, range: pts.length ? pad(ys, 0.06) : undefined },
       }), goDate);
-      const hidden = spec.points.filter((p) => p.i < state.window &&
-        (state.nights === "all" || (state.nights === "weekend") === p.we)).length - pts.length;
+      const inView = spec.points.filter((p) => p.i < state.window &&
+        (state.nights === "all" || (state.nights === "weekend") === p.we));
+      const noPrice = inView.filter((p) => p.price == null).length;
+      const noPace = inView.filter((p) => p.price != null && p.pace == null).length;
+      const plural = (n, word) => n + " night" + (n === 1 ? "" : "s") + " " + word;
       const note = root.querySelector(".chart-note");
       if (note) {
         note.textContent = pts.length + " nights shown" +
-          (hidden ? " · " + hidden + " without a price" + (yKey === "pace" ? " or pace" : "") + " (sold out or n/a) not shown" : "") +
+          (noPace ? " · " + plural(noPace, yKey === "pace" ? "with no pace yet, not shown" : "with no pace yet") +
+                    " (needs 20 snapshots at the same days-out)" : "") +
+          (!anyPace ? "; rooms left is shown until some night has a pace" : "") +
+          (noPrice ? " · " + plural(noPrice, "sold out (no price), not shown") : "") +
           (nOff ? " · ▶ " + nOff + " night" + (nOff > 1 ? "s" : "") + " above " + money0(cap) + " drawn at the right edge (hover for the price)" : "") +
           ". Shaded: cheaper than the median and " + (yKey === "rooms" ? "more rooms left" : "lower pace") + " than the median.";
       }
@@ -324,32 +334,30 @@
   // ------------------------------------------------------------------ Seasonality
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-  function weekRange(year, week) {
-    const start = new Date(Date.UTC(year, 0, 1 + (week - 1) * 7));
-    const end = new Date(Date.UTC(year, 0, Math.min(week * 7, week === 52 ? 366 : week * 7)));
-    const f = (d) => MONTHS[d.getUTCMonth()] + " " + d.getUTCDate();
-    return f(start) + "–" + f(end);
-  }
-
   GWT.finalFill = function (elId, panel, spec) {
     const t = theme();
     const n = panel.series.length;
     const colours = panel.series.map((s, i) => (i === n - 1 ? t.emph : i === n - 2 ? t.old1 : t.old2));
     const weeks = Array.from({ length: 52 }, (_, i) => i + 1);
+    // Week date ranges come from the server (week 52 runs to Dec 31, leap years included).
+    const labels = (year) => (spec.week_labels && spec.week_labels[String(year)]) || [];
     const traces = panel.series.map((s, i) => ({
       x: weeks, y: s.values, mode: "lines+markers", name: String(s.year), connectgaps: false,
       line: { width: i === n - 1 ? 2.5 : 2, color: colours[i] },
       marker: { size: 6, color: colours[i], line: { width: 1.5, color: t.ring } },
-      customdata: weeks.map((w, j) => [weekRange(s.year, w), s.counts[j]]),
+      customdata: weeks.map((w, j) => [labels(s.year)[j] || "Week " + w, s.counts[j]]),
       hovertemplate: "%{customdata[0]}, " + s.year + "<br><b>%{y:.0f}%</b> sold at arrival (avg of %{customdata[1]} nights)<extra></extra>",
     }));
+    // Only the latest (emphasised) year is labelled at its line end: earlier years can end
+    // at the same week and value, so their labels would overprint. The legend names them all.
     const annotations = [];
-    panel.series.forEach((s, i) => {
+    const latest = panel.series[n - 1];
+    if (latest) {
       let last = -1;
-      s.values.forEach((v, j) => { if (v != null) last = j; });
-      if (last >= 0) annotations.push({ x: last + 1, y: s.values[last], text: String(s.year), xanchor: "left", xshift: 6,
-                                        showarrow: false, font: { size: 11, color: t.ink2 } });
-    });
+      latest.values.forEach((v, j) => { if (v != null) last = j; });
+      if (last >= 0) annotations.push({ x: last + 1, y: latest.values[last], text: String(latest.year), xanchor: "left",
+                                        xshift: 6, showarrow: false, font: { size: 11, color: t.ink } });
+    }
     const years = new Set(panel.series.map((s) => s.year));
     const shapes = spec.week_spans.filter((w) => years.has(w.year)).map((w) => ({
       type: "rect", layer: "below", xref: "x", yref: "paper", x0: w.x0, x1: w.x1, y0: 0, y1: 1,

@@ -51,7 +51,9 @@
         <span class="num c-occ">{{ r.occupancy }}</span>
         <span class="num">{{ r.rooms_left }}</span>
         <span class="num c-acc">{{ r.accessible_rooms_left if r.has_accessible else '–' }}</span>
-        {% for f in d.families %}<span class="num">{{ r.rates[f] | money }}</span>{% else %}<span class="num">{{ r.cheapest | money }}</span>{% endfor %}
+        {# Phones show whole dollars (.m0) so four-digit rates fit their column; wider screens show cents (.m2). #}
+        {% for f in d.families %}<span class="num"><span class="m2">{{ r.rates[f] | money }}</span><span class="m0">{{ r.rates[f] | money0 }}</span></span>
+        {% else %}<span class="num"><span class="m2">{{ r.cheapest | money }}</span><span class="m0">{{ r.cheapest | money0 }}</span></span>{% endfor %}
         <span class="c-badge">{% if r.sold_out %}<span class="badge so">Sold out</span>{% endif %}</span>
       </summary>
       <div class="tablewrap">

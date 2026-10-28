@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
@@ -11,6 +10,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_FULL_CRON = "17 3 * * 0"  # Sundays 03:17
 DEFAULT_DAILY_CRON = "43 5 * * *"  # daily 05:43
+# 38 = 30 + 8: a night up to 30 days out today was up to 38 days out 6-8 days ago, so with a
+# 38-day daily window every night in the next 30 days has a scrape 6-8 days earlier
+# (pickup_7d, "sold in the last 7 days") on every day of the week, not only right after
+# the weekly sweep.
+DEFAULT_DAILY_DAYS = 38
 DEFAULT_TZ = "America/Toronto"
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -45,26 +49,58 @@ def parse_positive_int(value: str | None, default: int, name: str) -> int:
     return n
 
 
-_DOW_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")  # crontab numbering: 0 (and 7) = Sunday
 
 
-def _crontab_dow_to_names(field_: str) -> str:
-    """Standard crontab day-of-week numbers (0/7 = Sunday) -> names.
+def _dow_number(token: str, field_: str) -> int:
+    """One crontab day-of-week value: 0-7 (0 and 7 are Sunday) or a 3-letter name."""
+    t = token.strip().lower()
+    if t.isdigit():
+        n = int(t)
+        if 0 <= n <= 7:
+            return n
+    elif t in DOW_NAMES:
+        return DOW_NAMES.index(t)
+    raise ConfigError(f"bad day-of-week {token!r} in {field_!r} (use 0-7 or sun..sat)")
 
-    APScheduler 3's CronTrigger numbers days from Monday = 0, so passing crontab
-    numbers straight through would shift every weekly job by a day. Step values
-    (the number after '/') are left alone.
+
+def crontab_days(field_: str) -> tuple[int, ...]:
+    """Expand a crontab day-of-week field into the days it selects (0 = Sunday .. 6 = Saturday).
+
+    Handles '*', single days, ranges (including wrap-around like 5-1 = Fri..Mon, and 7 as
+    Sunday), lists, and steps ('*/2' = Sun, Tue, Thu, Sat; '1-5/2' = Mon, Wed, Fri; 'a/n'
+    runs from a to Saturday). The result is explicit, so APScheduler's Monday-first
+    numbering never sees a crontab number or a range that would come out reversed.
     """
+    if not field_.strip():
+        raise ConfigError("empty day-of-week field")
+    days: set[int] = set()
+    for item in field_.lower().split(","):
+        base, slash, step_s = item.partition("/")
+        step = 1
+        if slash:
+            if not step_s.isdigit() or int(step_s) < 1:
+                raise ConfigError(f"bad step {step_s!r} in day-of-week {field_!r}")
+            step = int(step_s)
+        if base == "*":
+            seq = list(range(7))
+        elif "-" in base:
+            a_s, _, b_s = base.partition("-")
+            a, b = _dow_number(a_s, field_), _dow_number(b_s, field_)
+            if a <= b:
+                seq = list(range(a, b + 1))
+            else:  # wrap around the end of the week, e.g. 5-1 or sat-sun
+                seq = list(range(a, 7)) + list(range(0, b + 1))
+        else:
+            a = _dow_number(base, field_)
+            seq = list(range(a, 7)) if slash else [a]
+        days.update(n % 7 for n in seq[::step])
+    return tuple(sorted(days))
 
-    def repl(m: re.Match) -> str:
-        if m.group(1):  # preceded by '/', it's a step
-            return m.group(0)
-        n = int(m.group(2))
-        if not 0 <= n <= 7:
-            raise ConfigError(f"day-of-week out of range: {n}")
-        return _DOW_NAMES[n]
 
-    return re.sub(r"(/)?(\d+)", repl, field_)
+def apscheduler_day_of_week(days: tuple[int, ...]) -> str:
+    """Explicit day names for APScheduler ('*' when every day is selected)."""
+    return "*" if len(days) == 7 else ",".join(DOW_NAMES[d] for d in days)
 
 
 @dataclass(frozen=True)
@@ -77,6 +113,7 @@ class CronSpec:
     day: str
     month: str
     day_of_week: str
+    days: tuple[int, ...] = ()
 
     @classmethod
     def parse(cls, expression: str) -> "CronSpec":
@@ -84,7 +121,17 @@ class CronSpec:
         if len(parts) != 5:
             raise ConfigError(f"cron expression needs 5 fields (min hour day month dow), got {expression!r}")
         minute, hour, day, month, dow = parts
-        return cls(expression, minute, hour, day, month, _crontab_dow_to_names(dow.lower()))
+        days = crontab_days(dow)
+        spec = cls(expression, minute, hour, day, month, apscheduler_day_of_week(days), days)
+        # Validate every field now, so a bad value is a ConfigError at startup rather than a
+        # crash inside the web server's lifespan.
+        from apscheduler.triggers.cron import CronTrigger
+
+        try:
+            CronTrigger(timezone="UTC", **spec.trigger_kwargs())
+        except ValueError as exc:
+            raise ConfigError(f"invalid cron expression {expression!r}: {exc}") from exc
+        return spec
 
     def trigger_kwargs(self) -> dict[str, str]:
         return {
@@ -122,7 +169,7 @@ class ScheduleConfig:
         jobs = []
         for name, cron_var, cron_default, days_var, days_default in (
             ("weekly", "GWT_FULL_SWEEP_CRON", DEFAULT_FULL_CRON, "GWT_FULL_SWEEP_DAYS", 365),
-            ("daily", "GWT_DAILY_SWEEP_CRON", DEFAULT_DAILY_CRON, "GWT_DAILY_SWEEP_DAYS", 30),
+            ("daily", "GWT_DAILY_SWEEP_CRON", DEFAULT_DAILY_CRON, "GWT_DAILY_SWEEP_DAYS", DEFAULT_DAILY_DAYS),
         ):
             raw = env.get(cron_var)
             expr = cron_default if raw is None else raw.strip()
