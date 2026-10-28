@@ -298,28 +298,35 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 
 def collection_pause(conn: sqlite3.Connection) -> dict | None:
-    """Collection is paused while the latest run was blocked (HTTP 403) and not yet unblocked."""
-    try:
-        latest = conn.execute(
-            "SELECT id, run_id, started_at, finished_at, message, blocked FROM runs ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError:  # no runs table yet
-        return None
-    if not latest or not latest[5]:
-        return None
+    """Collection is paused from a blocked (HTTP 403) run until `gwt unblock` acknowledges it, or
+    until a run started after it completes. A later run that aborts, errors or is interrupted
+    (e.g. a failed `gwt sweep --force`) does not lift the pause."""
     try:
         acknowledged = int(get_meta(conn).get("unblocked_run_id") or 0)
     except ValueError:
         acknowledged = 0
-    if latest[0] <= acknowledged:
+    try:
+        block = conn.execute(
+            """SELECT id, run_id, started_at, finished_at, message FROM runs
+               WHERE blocked = 1 AND id > ? ORDER BY id DESC LIMIT 1""",
+            (acknowledged,),
+        ).fetchone()
+        if block is None:
+            return None
+        completed_after = conn.execute(
+            "SELECT 1 FROM runs WHERE id > ? AND status = 'completed' LIMIT 1", (block[0],)
+        ).fetchone()
+    except sqlite3.OperationalError:  # no runs table yet
+        return None
+    if completed_after:
         return None
     return {
-        "run_row": latest[0],
-        "run_id": latest[1],
-        "started_at": latest[2],
-        "finished_at": latest[3],
-        "message": latest[4],
-        "date": scrape_local_date(latest[2]).isoformat(),
+        "run_row": block[0],
+        "run_id": block[1],
+        "started_at": block[2],
+        "finished_at": block[3],
+        "message": block[4],
+        "date": scrape_local_date(block[2]).isoformat(),
     }
 
 

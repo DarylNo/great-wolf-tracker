@@ -194,7 +194,7 @@ docker compose up -d --build
 docker compose logs -f                          # shows the next scheduled run times
 ```
 
-Open `http://<server>:8080`. The first scheduled sweep is the next 05:43 (38 days) or Sunday 03:17 (365 days). To start one now:
+Open `http://<server>:8080` (or whichever host port you mapped). The first scheduled sweep is the next 05:43 (38 days) or Sunday 03:17 (365 days). To start one now:
 
 ```bash
 docker compose exec gwt python -m gwt sweep --days 38
@@ -202,7 +202,7 @@ docker compose exec gwt python -m gwt sweep --days 38
 
 That still works while the scheduler is running: a file lock next to the database stops two sweeps from overlapping, and the second one exits with code 3.
 
-**Stopping.** `docker compose stop` (or a rebuild) lets a running sweep stop at the next date, or wake from its wait between requests, and record itself as `interrupted`; the compose file gives it 45 s (`stop_grace_period`) before Docker would kill it. Re-running the same day resumes it.
+**Stopping.** `docker compose stop` (or a rebuild) lets a running sweep stop at the next date, or wake from its wait between requests, and record itself as `interrupted`; the compose file gives it 45 s (`stop_grace_period`) before Docker would kill it. Re-running the same day resumes it. If you run the container from an **Unraid Docker UI template** instead of compose, add `--stop-timeout 45` under **Extra Parameters** (Docker's default is 10 s).
 
 **Unraid:** keep the data folder on a pool path, not the user-share FUSE path: map `/mnt/cache/appdata/great-wolf-tracker:/app/data` (use your pool's name if it isn't `cache`), or set the `appdata` share to **Exclusive access** (Unraid 6.12+, Shares → appdata → Primary storage only), which makes `/mnt/user/appdata` a direct path to the pool. Through the plain `/mnt/user/...` FUSE path (shfs), SQLite's WAL shared memory and the sweep's file lock aren't reliable, which risks a corrupt database or two sweeps at once. If you're already on `/mnt/user/appdata/great-wolf-tracker` and the share lives on the cache pool, the files are already at `/mnt/cache/appdata/great-wolf-tracker`: stop the container, change the volume path, start it again. Make the folder writable by uid 1000 and map container port 8080.
 
@@ -220,11 +220,11 @@ Take a backup, then rebuild. The new version migrates the database on startup (s
    ```bash
    git pull && docker compose up -d --build
    ```
-3. **Check `/healthz`:**
+3. **Check `/healthz`** on the host port you mapped (the left side of `ports:` in the compose file or the template's port; it may not be 8080, e.g. `8090:8080` means 8090):
    ```bash
-   curl -s http://localhost:8080/healthz
+   curl -s http://localhost:<port>/healthz      # e.g. curl -s http://localhost:8090/healthz
    ```
-   Expect `"status": "ok"`, `"db_exists": true`, `"has_data": true` and `"collection_paused": null`; `docker compose logs gwt` shows `database /app/data/gwl.db: migrated`.
+   Expect `"status": "ok"`, `"db_exists": true` and `"has_data": true`; `docker compose logs gwt` shows `database /app/data/gwl.db: migrated`. `"collection_paused"` should be `null`, **unless the database's last run before the upgrade was a 403**: then the dashboard shows "Collection paused" straight after the upgrade. That's expected (older builds didn't pause, the new one honours the recorded block); review it and run `gwt unblock` (see [Blocked runs](#blocked-runs-403)).
 4. **Run a small sweep** and check it on the Runs page:
    ```bash
    docker compose exec gwt python -m gwt sweep --days 3
@@ -267,7 +267,7 @@ Once you've looked into it (the run's message, the logs, the site's terms), resu
 docker compose exec gwt python -m gwt unblock
 ```
 
-`gwt sweep --force` sweeps once despite the pause (and clears it if that run completes); a new 403 pauses again.
+`gwt sweep --force` sweeps once despite the pause. The pause lifts only when you run `gwt unblock` or when a run started after the block **completes**; a forced run that aborts, errors or is interrupted leaves collection paused. A new 403 pauses again.
 
 ### Configuration (environment variables)
 

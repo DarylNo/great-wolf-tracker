@@ -405,3 +405,35 @@ def test_a_new_block_after_unblock_pauses_again(tmp_path, mock_api):
         assert db.collection_pause(conn)["run_id"] == "b2"
     finally:
         conn.close()
+
+
+def test_a_failed_forced_sweep_does_not_lift_the_pause(tmp_path, mock_api, monkeypatch):
+    path = tmp_path / "gwl.db"
+    mock_api["status"] = 403
+    with pytest.raises(SweepAborted):
+        execute_sweep(path, days=1, start=START, run_id="b")
+    # --force, but the API now returns 500s: the run aborts after 5 failures.
+    mock_api["status"] = 500
+    monkeypatch.setattr(sweep_mod, "backoff_delay", lambda n: 0.0)
+    with pytest.raises(SweepAborted):
+        execute_sweep(path, days=2, start=START, run_id="forced", force=True)
+    # --force interrupted before its first request.
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(SweepInterrupted):
+        execute_sweep(path, days=2, start=START, run_id="forced2", force=True, stop=stop)
+    conn = db.connect(path)
+    try:
+        statuses = [r[0] for r in conn.execute("SELECT status FROM runs ORDER BY id")]
+        assert statuses == ["aborted", "aborted", "interrupted"]
+        assert db.collection_pause(conn)["run_id"] == "b"  # still paused: nothing completed
+    finally:
+        conn.close()
+    # Scheduled sweeps still refuse.
+    mock_api["status"], mock_api["calls"] = 200, 0
+    with pytest.raises(SweepPaused):
+        execute_sweep(path, days=2, start=START)
+    assert mock_api["calls"] == 0
+    # Only unblock (or a forced run that completes) lifts it.
+    assert main(["unblock", "--db", str(path)]) == 0
+    assert execute_sweep(path, days=1, start=START, run_id="after").fetched == 1
