@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}Room types · Great Wolf Tracker{% endblock %}
+{% block content %}
+<h1>Room types</h1>
+{% if not has_data %}
+  <p class="lede">Suite codes grouped into rooms (accessible and bedding variants share a name).</p>
+  {{ nodata() }}
+{% else %}
+{% set n_codes = rooms | map(attribute='codes') | map('length') | sum %}
+<p class="lede">The API's {{ n_codes }} suite codes, grouped into {{ rooms | length }} rooms: accessible and bedding
+variants of the same room share a name.</p>
+
+<h2>Which rooms sell out first</h2>
+<p class="lede">Rooms left in each room type for every upcoming night, from the latest scrape of each date. Click a cell to open that night.</p>
+<div class="toolbar">
+  <span class="label">Window</span>
+  <div class="seg" role="group" aria-label="Window">
+    {% for w in matrix.windows %}<a href="?window={{ w }}" class="{{ 'on' if w == window }}" {{ 'aria-current="true"' | safe if w == window }}>{{ w }} days</a>{% endfor %}
+  </div>
+</div>
+<div class="legend">
+  <span class="ramp"><span class="end">Rooms left, as a share of the most that room has ever had available:</span>
+    {% for b in matrix.legend %}<span class="sw s{{ b.step }}">{{ b.label }}</span>{% endfor %}</span>
+  <span class="key"><span class="swatch so"></span>Sold out (×)</span>
+  <span class="key"><span class="swatch nd"></span>No data</span>
+  <span class="key">Shaded <strong>F</strong>/<strong>S</strong> headers: weekend nights; gaps mark weeks</span>
+</div>
+<div class="matrix-wrap">
+  <table class="matrix">
+    <thead>
+      <tr class="mon"><th class="room"></th>
+        {% for m in matrix.months %}<th colspan="{{ m.span }}">{{ m.label }}</th>{% endfor %}</tr>
+      <tr><th class="room"></th>
+        {% for c in matrix.columns %}<th class="{{ 'we' if c.weekend }}{{ ' wk' if c.week_end }}" title="{{ c.date | datelong }}">{{ c.weekday }}</th>{% endfor %}</tr>
+      <tr><th class="room">Room</th>
+        {% for c in matrix.columns %}<th class="{{ 'we' if c.weekend }}{{ ' wk' if c.week_end }}">{{ c.day }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+      {% for r in matrix.rows %}
+      <tr>
+        <th class="room" scope="row"><a href="/rooms/{{ r.slug }}">{{ r.name }}</a> <span class="cat">{{ r.category or '' }}</span></th>
+        {% for c in r.cells %}{% set col = matrix.columns[loop.index0] %}
+        <td class="c {{ 's' ~ c.step if c.state == 'ok' else c.state }}{{ ' wk' if col.week_end }}"><a href="/date/{{ col.date }}" data-tip="{{ c.tip }}" aria-label="{{ c.aria }}"></a></td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>All room types</h2>
+<p class="rule">Sorted by category, then the lowest rate ever seen. A room missing from the latest run may have been retired; a new one is marked new.</p>
+<div class="tablewrap limit">
+  <table class="data">
+    <thead><tr><th>Room</th><th>Category</th><th>Codes</th><th class="num">Max occ.</th><th>Accessible variant</th>
+      <th class="num">Most seen available</th><th class="num">Lowest rate seen</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
+    <tbody>
+      {% for r in rooms %}
+      <tr>
+        <td><a href="/rooms/{{ r.slug }}">{{ r.name }}</a></td>
+        <td>{{ r.category or '–' }}</td>
+        <td>{% for v in r.variants %}<a href="/suites/{{ v.code }}">{{ v.code }}</a>{{ ' (acc.)' if v.accessible }}{{ ', ' if not loop.last }}{% endfor %}</td>
+        <td class="num">{{ r.occupancy }}</td>
+        <td>{{ r.has_accessible | yesno }}</td>
+        <td class="num">{{ r.capacity_seen }}</td>
+        <td class="num">{{ r.lowest_rate_seen | money }}</td>
+        <td>{{ r.first_seen[:10] }}</td>
+        <td>{{ r.last_seen[:10] }}</td>
+        <td>{% if not r.in_latest_run %}<span class="badge muted">not in latest run</span>{% elif r.new_in_latest_run %}<span class="badge new">new</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

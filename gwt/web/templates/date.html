@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata, event_tags, curve_figure %}
+{% block title %}{{ arrival.isoformat() }} · Great Wolf Tracker{% endblock %}
+{% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block content %}
+<h1>{{ arrival.isoformat() | datelong }}</h1>
+
+{% if not has_data %}
+  {{ nodata() }}
+{% elif detail is none %}
+  <div class="empty"><strong>No snapshots for this night yet</strong>
+    Sweeps cover the next 365 days from the day they run. <a href="/">Back to the plan</a></div>
+{% else %}
+{% set d = detail %}
+<p class="caveat">Latest scrape {{ d.scraped_local }} (Toronto) · 1 night, 2 adults.</p>
+{{ event_tags(d.school_closure, d.info_tags) }}
+
+<div class="tiles">
+  <div class="tile"><div class="k">Rooms left</div>
+    <div class="v">{{ 'Sold out' if d.sold_out else d.rooms_left }}</div>
+    <div class="s">{{ d.pct_sold | pct }} sold (est.)</div></div>
+  <div class="tile"><div class="k">Lowest rate</div>
+    <div class="v">{{ d.min_rate | money }}</div><div class="s">per night, no offer code</div></div>
+  <div class="tile"><div class="k">Reference rate</div>
+    <div class="v">{{ d.ref_rate | money }}</div><div class="s">{{ ref_label }}</div></div>
+  <div class="tile"><div class="k">Room types fully sold</div>
+    <div class="v">{{ d.room_types_sold_out }} of {{ d.room_types }}</div><div class="s">rooms, all variants at 0</div></div>
+  <div class="tile"><div class="k">{{ 'Days until arrival' if d.days_until >= 0 else 'Arrival was' }}</div>
+    <div class="v">{{ d.days_until if d.days_until >= 0 else (-d.days_until) ~ ' days ago' }}</div>
+    <div class="s">{{ d.lead_days }} days out at the last scrape</div></div>
+  <div class="tile"><div class="k">Pace</div>
+    <div class="v">{{ d.pace_pct | pace_rank }}</div>
+    <div class="s">{% if d.pace_pct is not none %}percentile {{ pace_label }}{% else %}n/a: {{ d.pace_bucket_size }} snapshots at this days-out (needs 20){% endif %}</div></div>
+  <div class="tile"><div class="k">Sold in the last 7 days</div>
+    <div class="v">{{ d.pickup_7d | signed }}</div><div class="s">{{ 'rooms' if d.pickup_7d is not none else 'needs a scrape 6–8 days earlier' }}</div></div>
+</div>
+
+<h2>Room types</h2>
+<p class="rule">Suite codes grouped into rooms; expand one for its variants. Sorted by category, then by each room's usual price (its lowest rate seen), so sold-out rooms keep their place, greyed out. Rates are the cheapest per rate family among variants that still have rooms.</p>
+<div class="tablewrap limit">
+  <div class="rooms" style="--fams: {{ [d.families | length, 1] | max }}">
+    <div class="hdr">
+      <span>Room</span><span class="c-cat">Category</span><span class="num c-occ">Max occ.</span><span class="num">Rooms left</span><span class="num c-acc">Accessible left</span>
+      {% for f in d.families %}<span class="num">{{ f }}</span>{% else %}<span class="num">Rate</span>{% endfor %}<span class="c-badge"></span>
+    </div>
+    {% for r in d.rooms %}
+    <details class="{{ 'soldout' if r.sold_out }}">
+      <summary>
+        <span class="name"><a href="/rooms/{{ r.slug }}?date={{ d.arrival_date }}">{{ r.name }}</a></span>
+        <span class="c-cat">{{ r.category or '–' }}</span>
+        <span class="num c-occ">{{ r.occupancy }}</span>
+        <span class="num">{{ r.rooms_left }}</span>
+        <span class="num c-acc">{{ r.accessible_rooms_left if r.has_accessible else '–' }}</span>
+        {# Phones show whole dollars (.m0) so four-digit rates fit their column; wider screens show cents (.m2). #}
+        {% for f in d.families %}<span class="num"><span class="m2">{{ r.rates[f] | money }}</span><span class="m0">{{ r.rates[f] | money0 }}</span></span>
+        {% else %}<span class="num"><span class="m2">{{ r.cheapest | money }}</span><span class="m0">{{ r.cheapest | money0 }}</span></span>{% endfor %}
+        <span class="c-badge">{% if r.sold_out %}<span class="badge so">Sold out</span>{% endif %}</span>
+      </summary>
+      <div class="tablewrap">
+      <table class="data variants">
+        <thead><tr><th>Code</th><th>Accessible</th><th class="num">Beds</th><th class="num">Baths</th><th class="num">Max occ.</th><th class="num">Rooms left</th>
+          {% for f in d.families %}<th class="num">{{ f }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for v in r.variants %}
+          <tr class="{{ 'soldout' if v.sold_out }}">
+            <td><a href="/suites/{{ v.code }}?date={{ d.arrival_date }}">{{ v.code }}</a></td>
+            <td>{{ v.accessible | yesno }}</td>
+            <td class="num">{{ v.beds if v.beds is not none else '–' }}</td>
+            <td class="num">{{ v.baths if v.baths is not none else '–' }}</td>
+            <td class="num">{{ v.max_occupancy if v.max_occupancy is not none else '–' }}</td>
+            <td class="num">{{ v.rooms_left }}</td>
+            {% for f in d.families %}<td class="num">{{ v.rates[f] | money }}</td>{% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+</div>
+
+<h2>Booking curve</h2>
+<p class="lede">How this night has filled and priced as it got closer, against the middle 80% (and median) of every other
+night at the same days-out. Time runs left to right towards arrival.</p>
+<div class="grid2">
+  {{ curve_figure("curve-rooms", "Rooms left", "this night vs other nights", d.curve.rooms, d.curve.rooms_band) }}
+  {{ curve_figure("curve-rate", "Lowest rate", "this night vs other nights", d.curve.rate, d.curve.rate_band, money=true) }}
+</div>
+<script type="application/json" id="curve-data">{{ d.curve | tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if detail %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var c = GWT.data("curve-data");
+    GWT.redraw = function () {
+      GWT.curve("curve-rooms", { points: c.rooms, band: c.rooms_band, yTitle: "Rooms left", zero: true, name: "This night",
+                                 fmt: function (v) { return v == null ? "–" : Math.round(v) + " rooms"; } });
+      GWT.curve("curve-rate", { points: c.rate, band: c.rate_band, yTitle: "Lowest nightly rate", prefix: "$", name: "This night",
+                                fmt: GWT.fmt.money });
+    };
+    GWT.redraw();
+  });
+</script>
+{% endif %}
+{% endblock %}

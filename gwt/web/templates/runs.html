@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata, pause_banner %}
+{% block title %}Runs · Great Wolf Tracker{% endblock %}
+{% block content %}
+<h1>Runs</h1>
+<p class="sub">Each sweep invocation, newest first. Re-running a run ID (same day) resumes it and gets its own row. Times are Toronto local time.</p>
+{{ pause_banner(pause, pause_message) }}
+
+<div class="panel">
+  <strong>Schedule</strong>
+  {% if pause %}
+    <p class="sub">Paused: scheduled sweeps skip until <code>gwt unblock</code>.</p>
+  {% endif %}
+  {% if jobs %}
+    ({{ schedule.timezone }})
+    <ul>{% for j in jobs %}<li>{{ j.name }}: next run {{ j.next_run or "-" }}</li>{% endfor %}</ul>
+  {% elif not schedule.enabled %}
+    <p class="sub">Disabled (<code>GWT_SCHEDULE_ENABLED=false</code>). Sweeps only run from the CLI.</p>
+  {% else %}
+    <p class="sub">Not running in this process.</p>
+  {% endif %}
+</div>
+
+{% if not has_data %}
+  {{ nodata("No sweeps have been logged.") }}
+{% else %}
+  <div class="tablewrap limit"><table class="data">
+    <thead><tr><th>Run ID</th><th>Trigger</th><th>Started</th><th>Finished</th><th class="num">Days</th>
+        <th class="num">Fetched</th><th class="num">Skipped</th><th class="num">Failed dates</th><th class="num">Failed requests</th><th>Status</th></tr></thead>
+    {% for r in runs %}
+    <tr>
+      <td>{{ r.run_id }}</td><td>{{ r.trigger or "-" }}</td>
+      <td title="{{ r.started_at }} UTC">{{ r.started_local }}</td>
+      <td title="{{ (r.finished_at or '') ~ ' UTC' if r.finished_at }}">{{ r.finished_local or "-" }}</td>
+      <td class="num">{{ r.days }}</td><td class="num">{{ r.fetched }}</td><td class="num">{{ r.skipped }}</td>
+      <td class="num">{{ r.failed_dates }}</td><td class="num">{{ r.failures }}</td>
+      <td>
+        {% if r.blocked %}<span class="badge bad">BLOCKED (403)</span>
+        {% elif r.status == 'completed' %}<span class="badge ok">completed</span>
+        {% elif r.status == 'running' %}<span class="badge muted">running</span>
+        {% elif r.status == 'rate_limited' %}<span class="badge bad">rate-limited</span>
+        {% elif r.status == 'interrupted' %}<span class="badge muted">interrupted</span>
+        {% else %}<span class="badge bad">{{ r.status }}</span>{% endif %}
+        {% if r.message %}<div class="sub" style="white-space:normal;max-width:360px">{{ r.message }}</div>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% if pages > 1 %}
+  <nav class="pager" aria-label="Run pages">
+    {% if page_no > 1 %}<a href="?page={{ page_no - 1 }}">← Newer</a>{% endif %}
+    <span class="sub">Page {{ page_no }} of {{ pages }} · {{ total_runs }} runs</span>
+    {% if page_no < pages %}<a href="?page={{ page_no + 1 }}">Older →</a>{% endif %}
+  </nav>
+  {% endif %}
+{% endif %}
+{% endblock %}

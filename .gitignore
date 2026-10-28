@@ -137,3 +137,9 @@ cython_debug/
 # PyCharm / VS Code
 .idea/
 .vscode/
+
+# Great Wolf Tracker runtime data (SQLite db, WAL files, sweep lock)
+data/
+*.db-wal
+*.db-shm
+*.sweep.lock

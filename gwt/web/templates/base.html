@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Great Wolf Tracker{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+  {% block head %}{% endblock %}
+  <script src="/static/app.js?v={{ asset_version }}" defer></script>
+</head>
+<body>
+  {% if demo %}
+  <div class="banner" role="note"><div class="wrap">Synthetic demo data (made by <code>gwt demo-db</code>): not real Great Wolf numbers.</div></div>
+  {% endif %}
+  {% if events_problem %}
+  <div class="banner warn" role="alert"><div class="wrap">
+    School calendar file <code>{{ events_problem.file }}</code> (GWT_EVENTS_FILE) can't be used: {{ events_problem.error }}.
+    Showing the bundled calendar instead until it's fixed.
+  </div></div>
+  {% endif %}
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="/">Great Wolf Tracker</a>
+      <nav aria-label="Main">
+        <a href="/" class="{{ 'on' if active in ('plan.html', 'date.html') }}">Plan</a>
+        <a href="/seasonality" class="{{ 'on' if active == 'seasonality.html' }}">Seasonality</a>
+        <a href="/suites" class="{{ 'on' if active in ('suites.html', 'suite.html', 'room.html') }}">Room types</a>
+        <a href="/runs" class="{{ 'on' if active == 'runs.html' }}">Runs</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {% block content %}{% endblock %}
+    <footer class="foot">
+      Great Wolf Lodge Niagara demand tracker v{{ version }}. {{ price_footnote }}
+      JSON under <a href="/api/plan">/api</a>. LAN only, no login.
+    </footer>
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

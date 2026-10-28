@@ -1,0 +1,186 @@
+# School-closure calendar for Great Wolf Tracker
+# ==============================================
+#
+# Used to mark "extra" nights: a night is flagged for a region when the NEXT MORNING is a
+# school-closure day for that region (a break, PA day or holiday) and is not a regular
+# weekend day (Saturday/Sunday). Those are the nights families can stay without missing
+# school. Public holidays for Ontario (CA-ON) and New York (US-NY) are merged in
+# automatically from the `holidays` Python package, so they don't need to be listed here;
+# but on a day a school-board entry covers, the board entry is the only label shown.
+# Names under exclude_holidays (bottom of the file) are dropped from the package's list.
+#
+# Fields
+#   region    "ON" (Ontario) or "NY" (New York). Keep the quotes: unquoted ON means "true" in YAML.
+#   name      shown in tooltips and tags
+#   start     first closure day, YYYY-MM-DD
+#   end       last closure day, inclusive
+#   source    where the date came from (cite it)
+#   official  true if the source is the school board itself, false for third-party compilations
+#   closure   optional, default true. false = informational only (shown as a tag, never flags a night)
+#
+# Adding next school year
+#   Append entries for the new year when the boards publish their calendars, with the source
+#   URL. Don't guess dates. Either edit this file and rebuild the image, or copy it next to
+#   the database (e.g. /app/data/calendar_events.yaml) and set GWT_EVENTS_FILE to that path
+#   so it can be edited without a rebuild.
+#
+# TODO: Ontario (TDSB) summer break 2027 and all of the 2027-28 school year: add when the
+#       board publishes its calendar.
+# TODO: Buffalo Public Schools 2027-28: the end of summer recess 2027 (first day of school)
+#       and the 2027-28 breaks are not known yet.
+
+events:
+  # --- Ontario: TDSB 2026-27 key dates (official) ----------------------------------------
+  - region: "ON"
+    name: Winter break
+    start: 2026-12-21
+    end: 2027-01-01
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: March Break
+    start: 2027-03-15
+    end: 2027-03-19
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: PA day
+    start: 2026-11-20
+    end: 2026-11-20
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: PA day (elementary)
+    start: 2027-01-15
+    end: 2027-01-15
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: PA day
+    start: 2027-02-12
+    end: 2027-02-12
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: Family Day
+    start: 2027-02-15
+    end: 2027-02-15
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: Good Friday
+    start: 2027-03-26
+    end: 2027-03-26
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: Easter Monday
+    start: 2027-03-29
+    end: 2027-03-29
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+  - region: "ON"
+    name: Victoria Day
+    start: 2027-05-24
+    end: 2027-05-24
+    source: https://www.tdsb.on.ca/Portals/0/docs/2026-27%20TDSB%20School%20Year%20Calendar%20Key%20Dates.pdf
+    official: true
+
+  # --- New York: Buffalo Public Schools 2026-27 (unofficial third-party compilation) -------
+  # Every no-school day is listed explicitly, including the federal/state holidays the
+  # `holidays` package would also supply, so this list alone says when Buffalo schools close.
+  - region: "NY"
+    name: Labor Day
+    start: 2026-09-07
+    end: 2026-09-07
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Columbus Day
+    start: 2026-10-12
+    end: 2026-10-12
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Election Day
+    start: 2026-11-03
+    end: 2026-11-03
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Veterans Day
+    start: 2026-11-11
+    end: 2026-11-11
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Thanksgiving recess
+    start: 2026-11-25
+    end: 2026-11-27
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Winter recess
+    start: 2026-12-24
+    end: 2027-01-01
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Martin Luther King Jr. Day
+    start: 2027-01-18
+    end: 2027-01-18
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: "Presidents' Day"
+    start: 2027-02-15
+    end: 2027-02-15
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Mid-winter recess
+    start: 2027-02-16
+    end: 2027-02-19
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Good Friday
+    start: 2027-03-26
+    end: 2027-03-26
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Spring recess
+    start: 2027-03-30
+    end: 2027-04-02
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Memorial Day
+    start: 2027-05-31
+    end: 2027-05-31
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Juneteenth (observed)
+    start: 2027-06-18
+    end: 2027-06-18
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Last student day
+    start: 2027-06-24
+    end: 2027-06-24
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+    closure: false   # school is in session that day; summer recess starts after (end date not yet known)
+
+# Public-holiday names from the `holidays` package to ignore, per region. New York's
+# package calendar includes state commemorations that don't close Buffalo schools: Lincoln's
+# Birthday (Feb 12) and Susan B. Anthony Day (Feb 15) aren't on the Buffalo no-school list
+# (Feb 15 2027 is off anyway, as Presidents' Day, listed above). Election Day and Veterans
+# Day DO close Buffalo schools, so those stay.
+exclude_holidays:
+  "NY":
+    - "Lincoln's Birthday"
+    - "Susan B. Anthony Day"
