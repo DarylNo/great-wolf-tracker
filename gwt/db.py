@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 
 from gwt.collector import Snapshot
+from gwt.metrics import lead_days
 
 DEFAULT_DB_PATH = Path("data/gwl.db")
 
@@ -65,7 +66,15 @@ CREATE TABLE IF NOT EXISTS suites (
     max_occupancy           INTEGER,
     is_accessible           INTEGER,
     first_seen              TEXT    NOT NULL,   -- scraped_at of first sighting
-    last_seen               TEXT    NOT NULL    -- scraped_at of latest sighting
+    last_seen               TEXT    NOT NULL,   -- scraped_at of latest sighting
+    max_rooms_seen          INTEGER,            -- most rooms ever available (inventory proxy)
+    min_rate_seen           REAL                -- lowest nightly rate ever seen
+);
+
+-- Key/value facts about the database itself (e.g. synthetic_demo = 1 for `gwt demo-db`).
+CREATE TABLE IF NOT EXISTS meta (
+    key                     TEXT PRIMARY KEY,
+    value                   TEXT
 );
 
 -- One row per sweep invocation (a resumed run_id gets a new row).
@@ -88,6 +97,8 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_arrival ON snapshots (arrival_date, scraped_at);
 CREATE INDEX IF NOT EXISTS idx_suite_snapshots_arrival ON suite_snapshots (arrival_date, suite_code, scraped_at);
+CREATE INDEX IF NOT EXISTS idx_suite_snapshots_snapshot ON suite_snapshots (arrival_date, run_id);
+CREATE INDEX IF NOT EXISTS idx_suite_snapshots_code ON suite_snapshots (suite_code, arrival_date);
 CREATE INDEX IF NOT EXISTS idx_suite_rate_families_parent ON suite_rate_families (suite_snapshot_id);
 """
 
@@ -102,6 +113,18 @@ _ADDED_COLUMNS = {
         "sort_order": "INTEGER",
         "num_baths": "INTEGER",
     },
+    "suites": {
+        "max_rooms_seen": "INTEGER",
+        "min_rate_seen": "REAL",
+    },
+}
+
+# Backfill for a column the first time it's added to an existing database.
+_BACKFILL = {
+    ("suites", "max_rooms_seen"): """UPDATE suites SET max_rooms_seen = (
+        SELECT MAX(available_room_count) FROM suite_snapshots ss WHERE ss.suite_code = suites.suite_code)""",
+    ("suites", "min_rate_seen"): """UPDATE suites SET min_rate_seen = (
+        SELECT MIN(min_total_nightly_rate) FROM suite_snapshots ss WHERE ss.suite_code = suites.suite_code)""",
 }
 
 
@@ -111,6 +134,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, typ in cols.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+                backfill = _BACKFILL.get((table, name))
+                if backfill:
+                    conn.execute(backfill)
     conn.commit()
 
 
@@ -247,15 +273,19 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
             if s.suite_code:
                 conn.execute(
                     """INSERT INTO suites (suite_code, suite_brand, suite_category, max_occupancy,
-                           is_accessible, first_seen, last_seen)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                           is_accessible, first_seen, last_seen, max_rooms_seen, min_rate_seen)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT (suite_code) DO UPDATE SET
                            suite_brand    = COALESCE(excluded.suite_brand, suites.suite_brand),
                            suite_category = COALESCE(excluded.suite_category, suites.suite_category),
                            max_occupancy  = COALESCE(excluded.max_occupancy, suites.max_occupancy),
                            is_accessible  = COALESCE(excluded.is_accessible, suites.is_accessible),
                            first_seen     = MIN(suites.first_seen, excluded.first_seen),
-                           last_seen      = MAX(suites.last_seen, excluded.last_seen)""",
+                           last_seen      = MAX(suites.last_seen, excluded.last_seen),
+                           max_rooms_seen = MAX(COALESCE(suites.max_rooms_seen, excluded.max_rooms_seen),
+                                                COALESCE(excluded.max_rooms_seen, suites.max_rooms_seen)),
+                           min_rate_seen  = MIN(COALESCE(suites.min_rate_seen, excluded.min_rate_seen),
+                                                COALESCE(excluded.min_rate_seen, suites.min_rate_seen))""",
                     (
                         s.suite_code,
                         s.suite_brand,
@@ -264,6 +294,8 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
                         s.is_accessible,
                         scraped_at,
                         scraped_at,
+                        s.available_room_count,
+                        s.min_total_nightly_rate,
                     ),
                 )
 
@@ -293,19 +325,29 @@ def latest_suites_for_date(conn: sqlite3.Connection, arrival_date: str) -> tuple
 
 
 def suite_history(conn: sqlite3.Connection, arrival_date: str, suite_code: str) -> list[dict]:
-    """Booking curve: one row per scrape run for this suite and arrival date, oldest first."""
+    """Booking curve: one row per scrape run for this suite and arrival date, oldest first.
+
+    `days_out` is lead_days: arrival minus the scrape date in Toronto (see gwt.metrics).
+    """
     cur = conn.execute(
-        """SELECT ss.run_id, ss.scraped_at,
-                  CAST(julianday(ss.arrival_date) - julianday(substr(ss.scraped_at, 1, 10)) AS INTEGER)
-                      AS days_out,
-                  ss.available_room_count, ss.min_total_nightly_rate
+        """SELECT ss.run_id, ss.scraped_at, ss.available_room_count, ss.min_total_nightly_rate
            FROM suite_snapshots ss
            WHERE ss.arrival_date = ? AND ss.suite_code = ?
            ORDER BY ss.scraped_at, ss.id""",
         (arrival_date, suite_code),
     )
     cols = [c[0] for c in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for row in rows:
+        row["days_out"] = lead_days(arrival_date, row["scraped_at"])
+    return rows
+
+
+def get_meta(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        return {k: v for k, v in conn.execute("SELECT key, value FROM meta")}
+    except sqlite3.OperationalError:  # older/readonly db without the table yet
+        return {}
 
 
 def rate_families_for(conn: sqlite3.Connection, arrival_date: str, suite_code: str, run_id: str) -> list[dict]:

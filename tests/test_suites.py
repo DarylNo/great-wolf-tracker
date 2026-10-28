@@ -144,6 +144,35 @@ def test_migrates_old_suite_snapshots_table(tmp_path):
     conn.close()
 
 
+def test_suites_table_gets_max_rooms_and_min_rate_backfilled(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """CREATE TABLE suite_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+               scraped_at TEXT NOT NULL, arrival_date TEXT NOT NULL, suite_code TEXT NOT NULL,
+               suite_category TEXT, available_room_count INTEGER, min_total_nightly_rate REAL);
+           CREATE TABLE suites (suite_code TEXT PRIMARY KEY, suite_brand TEXT, suite_category TEXT,
+               max_occupancy INTEGER, is_accessible INTEGER, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+           INSERT INTO suites VALUES ('SFSSB', 'Family Suite', 'standard', 6, 0, 't1', 't2');
+           INSERT INTO suite_snapshots (run_id, scraped_at, arrival_date, suite_code, available_room_count, min_total_nightly_rate)
+               VALUES ('r1', 't1', '2026-11-18', 'SFSSB', 40, 399.99), ('r2', 't2', '2026-11-18', 'SFSSB', 12, 449.99);"""
+    )
+    old.commit()
+    old.close()
+    conn = db.connect(path)
+    assert conn.execute("SELECT max_rooms_seen, min_rate_seen FROM suites").fetchone() == (40, 399.99)
+    conn.close()
+
+
+def test_suites_table_tracks_max_rooms_and_min_rate(conn, sample_payload):
+    db.save_snapshot(conn, "r1", "2026-10-28T03:17:00+00:00", parse_availability(sample_payload, "2026-11-18"))
+    fewer = copy.deepcopy(sample_payload)
+    fewer["suites"][0]["availableRoomCount"] = 3
+    fewer["suites"][0]["rateFamilies"][0]["rates"][0]["totalNightlyRate"] = 299.99
+    db.save_snapshot(conn, "r2", "2026-11-04T03:17:00+00:00", parse_availability(fewer, "2026-11-18"))
+    assert conn.execute("SELECT max_rooms_seen, min_rate_seen FROM suites WHERE suite_code = 'SFSSB'").fetchone() == (12, 299.99)
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -192,9 +221,10 @@ def test_cli_suites_booking_curve(tmp_path, sample_payload):
     assert "Booking curve for SFSSB, arrival 2026-11-18 (2 snapshots)" == lines[0]
     assert "Saver" in lines[1] and "Flexible" in lines[1]
     first, second = lines[3], lines[4]
-    assert first.split()[:4] == ["2026-10-28T03:17:00+00:00", "21", "12", "$379.99"]
+    # Days out is lead_days: 03:17 UTC is the previous evening in Toronto (Oct 27 / Nov 3).
+    assert first.split()[:4] == ["2026-10-28T03:17:00+00:00", "22", "12", "$379.99"]
     assert "$419.99" in first and "yes" not in first
-    assert second.split()[:4] == ["2026-11-04T03:17:00+00:00", "14", "0", "$419.99"]
+    assert second.split()[:4] == ["2026-11-04T03:17:00+00:00", "15", "0", "$419.99"]
     assert "$529.99" in second and second.rstrip().endswith("yes")
 
 

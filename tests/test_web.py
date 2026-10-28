@@ -1,21 +1,22 @@
-"""Dashboard pages and JSON API against a temp db seeded from the fixture."""
+"""Dashboard pages and JSON API on a demo DB, a single-snapshot DB, and an empty/missing DB."""
 
-import copy
-import random
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from gwt import db
 from gwt.collector import parse_availability
 from gwt.config import ScheduleConfig, Settings
-from gwt.sweep import SweepAborted, run_sweep
+from gwt.demo import build_demo_db
+from gwt.metrics import LODGE_TZ
+from gwt.web import data
 from gwt.web.app import create_app
 
-TODAY = date(2026, 11, 1)
+TODAY = date(2026, 10, 28)
+NOW = datetime(2026, 10, 28, 12, 0, tzinfo=LODGE_TZ)
 NO_SCHEDULE = ScheduleConfig(enabled=False, timezone="America/Toronto", jobs=())
 
 
@@ -24,186 +25,313 @@ def make_client(db_path: Path) -> TestClient:
     return TestClient(create_app(settings, today=lambda: TODAY))
 
 
-def _variant(payload: dict, sfssb_rooms: int, saver: float) -> dict:
-    p = copy.deepcopy(payload)
-    p["suites"][0]["availableRoomCount"] = sfssb_rooms
-    p["suites"][0]["rateFamilies"][0]["rates"][0]["totalNightlyRate"] = saver
-    return p
+@pytest.fixture(scope="module")
+def demo_db(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("demo") / "demo.db"
+    build_demo_db(path, weeks=5, now=NOW)
+    return path
+
+
+@pytest.fixture(scope="module")
+def client(demo_db):
+    with make_client(demo_db) as c:
+        yield c
 
 
 @pytest.fixture
-def seeded_db(tmp_path, sample_payload) -> Path:
-    path = tmp_path / "gwl.db"
+def single_db(tmp_path, sample_payload) -> Path:
+    """Exactly one snapshot: one arrival date, one scrape."""
+    path = tmp_path / "one.db"
     conn = db.connect(path)
-
-    # Two weekly sweeps over the first 10 upcoming days via the real sweep loop (logs `runs` too).
-    def handler_for(run: int):
-        def handler(request):
-            d = date.fromisoformat(request.url.params["arrival"])
-            offset = (d - TODAY).days
-            rooms = max(12 - offset - 4 * run, 0)
-            return httpx.Response(200, json=_variant(sample_payload, rooms, 379.99 + 10 * offset + 50 * run))
-        return handler
-
-    for run, (run_id, ts) in enumerate([("2026-10-25", "2026-10-25T03:17:00+00:00"),
-                                        ("2026-11-01", "2026-11-01T03:17:00+00:00")]):
-        client = httpx.Client(base_url="https://prod.api.greatwolf.com", transport=httpx.MockTransport(handler_for(run)))
-        run_sweep(conn, client, days=10, start=TODAY, run_id=run_id, trigger="schedule:weekly",
-                  sleep=lambda s: None, rng=random.Random(0), clock=lambda ts=ts: ts)
-
-    # A blocked run for the Runs page.
-    blocked = httpx.Client(base_url="https://prod.api.greatwolf.com",
-                           transport=httpx.MockTransport(lambda r: httpx.Response(403)))
-    with pytest.raises(SweepAborted):
-        run_sweep(conn, blocked, days=3, start=TODAY, run_id="2026-11-02", trigger="cli",
-                  sleep=lambda s: None, clock=lambda: "2026-11-02T10:00:00+00:00")
-
-    # Past history across two years for the ISO-week / trends views.
-    for year in (2025, 2026):
-        for d in (date(year, 7, 14), date(year, 7, 15), date(year, 3, 10)):
-            snap = parse_availability(_variant(sample_payload, 2 if d.month == 7 else 10, 500.0), d)
-            db.save_snapshot(conn, f"{year}-hist", f"{d.isoformat()}T05:43:00+00:00", snap)
+    db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00",
+                     parse_availability(sample_payload, TODAY + timedelta(days=3)))
     conn.close()
     return path
 
 
-@pytest.fixture
-def client(seeded_db):
-    with make_client(seeded_db) as c:
-        yield c
+def keys_deep(obj) -> set[str]:
+    if isinstance(obj, dict):
+        return set(obj) | set().union(*(keys_deep(v) for v in obj.values())) if obj else set()
+    if isinstance(obj, list):
+        return set().union(*(keys_deep(v) for v in obj)) if obj else set()
+    return set()
 
 
-# --------------------------------------------------------------------------- pages
+# --------------------------------------------------------------------------- Plan (/)
 
 
-def test_overview_page(client):
+def test_plan_page(client):
     r = client.get("/")
     assert r.status_code == 200
     html = r.text
-    assert "Overview" in html and 'id="cal"' in html and 'id="iso"' in html
-    assert "plotly.js-dist-min@2.35.2" in html
-    assert "Quietest upcoming dates" in html
-    assert "/date/2026-11-10" in html  # emptiest seeded date shows in the quietest list
-    assert "No data yet" not in html
+    assert "When should we go?" in html
+    assert "Synthetic demo data" in html  # demo banner
+    assert "October 2026" in html and "September 2027" in html  # 12 wall-calendar months
+    assert html.count('class="month"') == 12
+    assert 'id="m-price" value="price" checked' in html
+    assert "Far-out dates haven&#39;t been booked yet" in html or "Far-out dates haven't been booked yet" in html
+    assert "Cheapest upcoming nights" in html and "Filling fastest" in html
+    assert "ties go to the night with more rooms left" in html
+    assert "most rooms sold in the last 7 days first" in html
+    assert 'id="scatter"' in html and 'id="scatter-data"' in html
+    assert "/static/plotly.min.js" in html and "cdn." not in html
+    assert not re.search(r"demand index", html, re.I)
+
+
+def test_plan_metric_toggle_param(client):
+    html = client.get("/?metric=rooms").text
+    assert 'id="m-rooms" value="rooms" checked' in html
+    assert 'id="m-price" value="price" checked' not in html
+    assert 'id="m-price" value="price" checked' in client.get("/?metric=bogus").text
+
+
+def test_plan_calendar_cells(client):
+    html = client.get("/").text
+    plan = client.get("/api/plan").json()
+    sold = [n["date"] for n in plan["nights"] if n["has_data"] and n["sold_out"]]
+    assert sold, "the demo should have sold-out nights"
+    cell = re.search(rf'<a class="day ([^"]*)"\s+href="/date/{sold[0]}"', html)
+    assert cell and " so" in cell.group(1)
+    today_cell = re.search(rf'<a class="day ([^"]*)"\s+href="/date/{TODAY.isoformat()}"', html)
+    assert today_cell and "today" in today_cell.group(1)
+    # NY Thanksgiving recess starts Wed Nov 25, so the night of Tue Nov 24 is flagged.
+    ev = re.search(r'<a class="day ([^"]*)"\s+href="/date/2026-11-24" data-tip="([^"]*)"', html)
+    assert ev and " ev" in ev.group(1)
+    assert "No school next day" in ev.group(2) and "NY: Thanksgiving recess" in ev.group(2)
+    # Tooltip fields.
+    for field in ("rooms left", "lowest rate", "room types sold out", "before arrival at last scrape", "pace vs other dates at the same days-out"):
+        assert field in ev.group(2)
+
+
+def test_api_plan(client):
+    body = client.get("/api/plan").json()
+    assert body["has_data"] is True
+    assert body["start"] == TODAY.isoformat()
+    assert len(body["nights"]) == 365
+    assert not any("demand" in k for k in keys_deep(body))
+    first = body["nights"][0]
+    assert {"date", "rooms_left", "pct_sold", "min_rate", "ref_rate", "lead_days", "pace_pct", "pickup_7d",
+            "room_types_sold_out", "room_types", "school_closure"} <= set(first)
+    assert first["room_types"] == 17
+    assert body["status"]["capacity_est"] > 300
+    assert body["definitions"]["pace"] == "vs other dates at the same days-out"
+    cheapest = body["cheapest_nights"]["nights"]
+    assert len(cheapest) == 12
+    order = [(n["min_rate"], -n["rooms_left"]) for n in cheapest]
+    assert order == sorted(order)
+    assert all(not n["sold_out"] for n in cheapest)
+    filling = body["filling_fastest"]["nights"]
+    assert filling and all(n["date"] < (TODAY + timedelta(days=60)).isoformat() for n in filling)
+    with_pickup = [n["pickup_7d"] for n in filling if n["pickup_7d"] is not None]
+    assert with_pickup == sorted(with_pickup, reverse=True)
+    paced = [n for n in body["nights"] if n["pace_pct"] is not None]
+    assert paced and all(0 <= n["pace_pct"] <= 100 for n in paced)
+    missing = [n for n in body["nights"] if not n["has_data"]]
+    assert all(set(n) == set(first) and n["rooms_left"] is None for n in missing)  # same shape, nulls
+
+
+def test_plan_colour_legends_use_real_values(demo_db, client):
+    conn = db.connect_readonly(demo_db)
+    try:
+        stats = data.get_stats(conn, str(demo_db.resolve()))
+        plan = data.plan(conn, stats, TODAY)
+    finally:
+        conn.close()
+    price = plan["scales"]["price"]
+    rooms = plan["scales"]["rooms"]
+    assert [b["step"] for b in price] == sorted(b["step"] for b in price)  # light -> dark
+    assert all(b["label"].startswith("$") for b in price)
+    lows = [float(b["label"].split("–")[0].replace("$", "").replace(",", "")) for b in price]
+    assert lows == sorted(lows)  # pricier = darker
+    room_lows = [int(b["label"].split("–")[0]) for b in rooms]
+    assert room_lows == sorted(room_lows, reverse=True)  # fewer rooms = darker
+    for n in plan["nights"]:
+        if n["has_data"] and not n["sold_out"]:
+            assert 0 <= n["steps"]["price"] <= 4 and 0 <= n["steps"]["rooms"] <= 4
+
+
+# --------------------------------------------------------------------------- Seasonality
+
+
+def test_seasonality_page_and_redirect(client):
+    r = client.get("/seasonality")
+    assert r.status_code == 200
+    html = r.text
+    assert "How full each week ends up" in html
+    assert "Forecast from current prices" in html
+    assert "Great Wolf raises prices when it expects to be busy" in html
+    assert 'id="ff-weekend"' in html and 'id="ff-weekday"' in html and 'id="forecast"' in html
+    redirect = client.get("/trends", follow_redirects=False)
+    assert redirect.status_code == 301 and redirect.headers["location"] == "/seasonality"
+
+
+def test_api_seasonality(client):
+    body = client.get("/api/seasonality").json()
+    assert body["has_data"] and body["final_fill_nights"] > 20
+    assert set(body["panels"]) == {"weekend", "weekday"}
+    for panel in body["panels"].values():
+        for series in panel["series"]:
+            assert len(series["values"]) == 52
+            assert all(v is None or 0 <= v <= 100 for v in series["values"])
+    assert len(body["forecast"]) == 52
+    assert any(w["weekday"] for w in body["forecast"]) and any(w["weekend"] for w in body["forecast"])
+    titles = {s["title"] for s in body["forecast_spans"]}
+    assert "ON: March Break" in titles and "ON: Winter break" in titles
+    assert not any("demand" in k for k in keys_deep(body))
+
+
+# --------------------------------------------------------------------------- Date page
 
 
 def test_date_page(client):
-    r = client.get("/date/2026-11-01")
+    r = client.get("/date/2026-11-21")
     assert r.status_code == 200
     html = r.text
-    assert "Arrival 2026-11-01" in html
-    assert "Superior Family Suite" in html and "Grizzly Bear Suite" in html
-    assert "Saver" in html and "Flexible" in html  # one column per rate family
-    assert "Sold out" in html  # SFSSB is sold out in the latest run for this date
-    assert 'id="curve"' in html
-    assert "2026-10-25T03:17:00+00:00" in html and "2026-11-01T03:17:00+00:00" in html  # curve points
+    assert "Sat, Nov 21, 2026" in html
+    for tile in ("Rooms left", "Lowest rate", "Reference rate", "Room types fully sold", "Days until arrival", "Pace"):
+        assert tile in html
+    assert "of 17" in html
+    assert html.count("<details") >= 17
+    assert "Timber Wolf Cottage" in html and "SFSSA" in html and "CTWAA" in html
+    assert 'id="curve-rooms"' in html and 'id="curve-rate"' in html
+    assert "Show as a table" in html
 
 
-def test_date_page_without_snapshots(client):
-    r = client.get("/date/2027-06-01")
-    assert r.status_code == 200
-    assert "No snapshots for this date yet" in r.text
-
-
-def test_bad_date_is_404(client):
-    assert client.get("/date/not-a-date").status_code == 404
-    assert client.get("/api/dates/2026-13-40").status_code == 404
-
-
-def test_suites_pages(client):
-    r = client.get("/suites")
-    assert r.status_code == 200
-    assert "Superior Family Suite" in r.text and "Cottage" in r.text and "First seen" in r.text
-
-    r = client.get("/suites/sfssb")
-    assert r.status_code == 200
-    assert "Superior Family Suite" in r.text
-    assert 'id="upcoming"' in r.text and 'id="curve"' in r.text
-    assert '<option value="2026-11-01" selected' in r.text
-
-    r = client.get("/suites/SFSSB?date=2026-11-05")
-    assert '<option value="2026-11-05" selected' in r.text
-
-    assert client.get("/suites/NOPE").status_code == 404
-
-
-def test_runs_page(client):
-    r = client.get("/runs")
-    assert r.status_code == 200
-    assert "schedule:weekly" in r.text and "completed" in r.text
-    assert "BLOCKED (403)" in r.text
-    assert "Disabled" in r.text  # scheduler off in tests
-
-
-def test_trends_page(client):
-    r = client.get("/trends")
-    assert r.status_code == 200
-    assert 'id="trend"' in r.text and "Trends" in r.text
-
-
-# --------------------------------------------------------------------------- API
-
-
-def test_api_overview(client):
-    body = client.get("/api/overview").json()
-    assert body["has_data"] is True
-    assert body["start"] == "2026-11-01"
-    assert len(body["dates"]) == 10
-    first = body["dates"][0]
-    assert {"arrival_date", "demand", "total_rooms_available", "suite_types_sold_out", "min_rate"} <= set(first)
-    assert all(0 <= d["demand"] <= 100 for d in body["dates"])
-    # Fewer rooms left -> higher demand.
-    by_date = {d["arrival_date"]: d for d in body["dates"]}
-    assert by_date["2026-11-10"]["demand"] > by_date["2026-11-01"]["demand"]
-
-
-def test_api_trends(client):
-    body = client.get("/api/trends").json()
-    assert body["years"] == [2025, 2026]
-    assert len(body["weeks"]) == 53
-    jul_week = date(2025, 7, 14).isocalendar().week
-    assert body["z"][0][jul_week - 1] is not None
+def test_date_page_closure_tags(client):
+    html = client.get("/date/2027-03-14").text
+    assert "No school next day · ON: March Break" in html
+    assert "No school next day" not in client.get("/date/2027-03-12").text
 
 
 def test_api_date(client):
-    body = client.get("/api/dates/2026-11-10").json()
-    assert body["snapshot"]["run_id"] == "2026-11-01"
-    assert "raw_json" not in body["snapshot"]
-    assert len(body["suites"]) == 5 and len(body["curve"]) == 2
-    assert [c["total_rooms_available"] for c in body["curve"]] == [10, 7]  # 12+5+2 minus SFSSB drawdown
-    sfssb = body["suites"][0]
-    assert sfssb["suite_code"] == "SFSSB" and sfssb["sold_out"] is True  # 0 rooms left on 11-10
-    assert set(sfssb["rates"]) == {"Saver", "Flexible"}
-    assert client.get("/api/dates/2027-06-01").status_code == 404
+    body = client.get("/api/dates/2026-11-21").json()
+    assert body["has_data"] and body["room_types"] == 17
+    assert len(body["rooms"]) == 17
+    assert sum(len(r["variants"]) for r in body["rooms"]) == 27
+    assert body["families"] == ["Saver", "Flexible"]
+    family = next(r for r in body["rooms"] if r["name"] == "Family Suite")
+    assert family["has_accessible"] and family["occupancy"] == "6"
+    assert family["rooms_left"] == sum(v["rooms_left"] for v in family["variants"])
+    curve = body["curve"]
+    assert len(curve["rooms_band"]) == 9 and len(curve["rate_band"]) == 9
+    leads = [p["lead"] for p in curve["rooms"]]
+    assert leads == sorted(leads, reverse=True) and all(0 <= x <= 365 for x in leads)
+    assert body["days_until"] == 24
+    assert not any("demand" in k for k in keys_deep(body))
 
 
-def test_api_suites(client):
-    body = client.get("/api/suites").json()
-    codes = {s["suite_code"] for s in body["suites"]}
-    assert codes == {"SFSSB", "SDLXB", "TWLFD", "PGRZL", "CCTGE"}
-    one = client.get("/api/suites/SFSSB").json()
-    assert one["suite"]["suite_brand"] == "Superior Family Suite"
-    assert len(one["upcoming"]) == 10 and len(one["curve"]) == 2
-    assert client.get("/api/suites/NOPE").status_code == 404
+def test_date_without_snapshots_and_bad_dates(client):
+    r = client.get("/date/2030-01-01")
+    assert r.status_code == 200 and "No snapshots for this night yet" in r.text
+    assert client.get("/date/not-a-date").status_code == 404
+    assert client.get("/api/dates/2026-13-40").status_code == 404
+    assert client.get("/api/dates/2030-01-01").status_code == 404
 
 
-def test_api_runs_and_healthz(client):
-    runs = client.get("/api/runs").json()
-    assert [r["status"] for r in runs["runs"]] == ["aborted", "completed", "completed"]
-    assert runs["runs"][0]["blocked"] == 1
-    assert runs["scheduler"]["enabled"] is False
+# --------------------------------------------------------------------------- Room types
 
+
+def test_rooms_page_and_matrix(client):
+    html = client.get("/suites").text
+    assert "Which rooms sell out first" in html
+    assert "27 suite codes, grouped into 17 rooms" in html
+    rows = re.findall(r'<th class="room" scope="row">', html)
+    assert len(rows) == 17
+    first_row = html.split('<th class="room" scope="row">')[1].split("</tr>")[0]
+    assert first_row.count('<td class="c ') == 90  # default window
+    assert 'class="on"' in html and ">90 days<" in html
+    assert "Sold out (×)" in html and 'class="we' in html
+    html30 = client.get("/suites?window=30").text
+    assert html30.split('<th class="room" scope="row">')[1].split("</tr>")[0].count('<td class="c ') == 30
+    bogus = client.get("/suites?window=7").text
+    assert bogus.split('<th class="room" scope="row">')[1].split("</tr>")[0].count('<td class="c ') == 90
+
+
+def test_room_group_and_code_pages(client):
+    r = client.get("/rooms/timber-wolf-cottage")
+    assert r.status_code == 200
+    assert all(code in r.text for code in ("CTW2B", "CTW3B", "CTW4B", "CTWAA"))
+    assert 'id="up-rooms"' in r.text and 'id="curve-rooms"' in r.text
+    r = client.get("/rooms/family-suite?date=2026-11-21")
+    assert '<option value="2026-11-21" selected' in r.text
+    r = client.get("/suites/sfssb")
+    assert r.status_code == 200 and "Family Suite" in r.text and "/rooms/family-suite" in r.text
+    assert client.get("/rooms/nope").status_code == 404
+    assert client.get("/suites/NOPE").status_code == 404
+
+
+def test_api_rooms(client):
+    rooms = client.get("/api/rooms").json()["rooms"]
+    assert len(rooms) == 17 and sum(len(r["codes"]) for r in rooms) == 27
+    cats = [r["category"] for r in rooms]
+    assert cats == sorted(cats, key=["standard", "themed", "premium", "cottage"].index)
+    matrix = client.get("/api/rooms/matrix?window=30").json()
+    assert len(matrix["dates"]) == 30 and len(matrix["rooms"]) == 17
+    assert all(len(r["rooms_left"]) == 30 for r in matrix["rooms"])
+    room = client.get("/api/rooms/timber-wolf-cottage").json()
+    assert room["codes"] == ["CTW2B", "CTW3B", "CTW4B", "CTWAA"]
+    assert room["upcoming"] and room["curve"]["rooms"]
+    suites = client.get("/api/suites").json()["suites"]
+    assert len(suites) == 27 and {"code", "name", "room_slug"} <= set(suites[0])
+    assert client.get("/api/suites/SFSSB").json()["room_slug"] == "family-suite"
+    assert client.get("/api/rooms/nope").status_code == 404
+
+
+# --------------------------------------------------------------------------- Runs / health / static
+
+
+def test_runs_page_and_health(client):
+    r = client.get("/runs")
+    assert r.status_code == 200 and "schedule:weekly" in r.text and "completed" in r.text
     health = client.get("/healthz").json()
-    assert health["status"] == "ok" and health["has_data"] is True
-    assert health["last_completed_run"]["run_id"] == "2026-11-01"
+    assert health["status"] == "ok" and health["has_data"] and health["synthetic_demo"] is True
 
 
-# --------------------------------------------------------------------------- empty states
+def test_static_assets_are_local(client):
+    r = client.get("/static/plotly.min.js")
+    assert r.status_code == 200
+    assert "javascript" in r.headers["content-type"]
+    assert len(r.content) > 1_000_000
+    assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/app.css").status_code == 200
 
-PAGES = ["/", "/date/2026-11-01", "/suites", "/suites/SFSSB", "/runs", "/trends"]
+
+# --------------------------------------------------------------------------- single snapshot
+
+PAGES = ["/", "/seasonality", f"/date/{(TODAY + timedelta(days=3)).isoformat()}", "/suites",
+         "/rooms/superior-family-suite", "/suites/SFSSB", "/runs"]
 
 
 @pytest.mark.parametrize("path", PAGES)
+def test_pages_with_a_single_snapshot(single_db, path):
+    with make_client(single_db) as c:
+        r = c.get(path)
+    assert r.status_code == 200, r.text[:500]
+
+
+def test_single_snapshot_content(single_db):
+    with make_client(single_db) as c:
+        plan = c.get("/").text
+        assert "capacity estimate improves after the first full sweep" in plan
+        body = c.get("/api/plan").json()
+        night = next(n for n in body["nights"] if n["has_data"])
+        assert night["pace_pct"] is None and night["pickup_7d"] is None  # too little data
+        assert body["status"]["capacity_provisional"] is True
+        season = c.get("/seasonality").text
+        assert "No final-fill data yet" in season  # its one scrape is 3 days out
+        detail = c.get(f"/api/dates/{(TODAY + timedelta(days=3)).isoformat()}").json()
+        assert len(detail["curve"]["rooms"]) == 1
+        assert all(b is None for b in detail["curve"]["rooms_band"])  # no other dates to compare
+        date_page = c.get(f"/date/{(TODAY + timedelta(days=3)).isoformat()}").text
+        assert "n/a: 1 snapshots at this days-out (needs 20)" in date_page
+
+
+# --------------------------------------------------------------------------- empty / missing db
+
+EMPTY_PAGES = ["/", "/seasonality", "/date/2026-11-01", "/suites", "/rooms/family-suite", "/suites/SFSSB", "/runs"]
+
+
+@pytest.mark.parametrize("path", EMPTY_PAGES)
 def test_pages_with_missing_db(tmp_path, path):
     with make_client(tmp_path / "missing.db") as c:
         r = c.get(path)
@@ -212,7 +340,7 @@ def test_pages_with_missing_db(tmp_path, path):
     assert not (tmp_path / "missing.db").exists()  # the web app never creates the db
 
 
-@pytest.mark.parametrize("path", PAGES)
+@pytest.mark.parametrize("path", EMPTY_PAGES)
 def test_pages_with_empty_db(tmp_path, path):
     db.connect(tmp_path / "empty.db").close()
     with make_client(tmp_path / "empty.db") as c:
@@ -223,24 +351,31 @@ def test_pages_with_empty_db(tmp_path, path):
 
 def test_api_with_empty_db(tmp_path):
     with make_client(tmp_path / "missing.db") as c:
-        assert c.get("/api/overview").json() == {"has_data": False, "dates": []}
+        assert c.get("/api/plan").json() == {"has_data": False, "nights": []}
+        assert c.get("/api/rooms").json() == {"has_data": False, "rooms": []}
         assert c.get("/api/suites").json() == {"has_data": False, "suites": []}
-        assert c.get("/api/trends").json()["has_data"] is False
+        assert c.get("/api/seasonality").json()["has_data"] is False
+        assert c.get("/api/rooms/matrix").json()["has_data"] is False
         assert c.get("/api/runs").json()["runs"] == []
+        assert c.get("/api/dates/2026-11-01").status_code == 404
         health = c.get("/healthz").json()
-        assert health["status"] == "ok" and health["db_exists"] is False
+        assert health["status"] == "ok" and health["db_exists"] is False and health["synthetic_demo"] is False
 
 
-def test_readonly_connection_cannot_write(seeded_db):
+def test_readonly_connection_cannot_write(demo_db):
     import sqlite3
 
-    conn = db.connect_readonly(seeded_db)
+    conn = db.connect_readonly(demo_db)
     with pytest.raises(sqlite3.OperationalError):
         conn.execute("DELETE FROM snapshots")
     conn.close()
 
 
-def test_upcoming_window_excludes_past(client):
-    dates = [d["arrival_date"] for d in client.get("/api/overview").json()["dates"]]
-    assert min(dates) >= TODAY.isoformat()
-    assert max(dates) <= (TODAY + timedelta(days=364)).isoformat()
+def test_matrix_step_bins():
+    assert data.matrix_step(100, 100) == 0
+    assert data.matrix_step(81, 100) == 0
+    assert data.matrix_step(80, 100) == 1
+    assert data.matrix_step(41, 100) == 2
+    assert data.matrix_step(20, 100) == 4
+    assert data.matrix_step(1, 100) == 4
+    assert data.matrix_step(3, None) == 2

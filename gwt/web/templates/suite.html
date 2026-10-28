@@ -1,6 +1,7 @@
 {% extends "base.html" %}
-{% from "_macros.html" import nodata %}
+{% from "_macros.html" import nodata, curve_figure, upcoming_table %}
 {% block title %}{{ code }} · Great Wolf Tracker{% endblock %}
+{% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 {% if not has_data %}
   <h1>{{ code }}</h1>
@@ -9,59 +10,65 @@
   <h1>{{ code }}</h1>
   <div class="empty"><strong>Unknown suite code</strong>No suite {{ code }} has been seen. <a href="/suites">All room types</a></div>
 {% else %}
-  {% set s = detail.suite %}
-  <h1>{{ s.suite_brand or s.suite_code }}</h1>
-  <p class="sub">{{ s.suite_code }} · {{ s.suite_category or "uncategorised" }} · max occupancy {{ s.max_occupancy if s.max_occupancy is not none else "?" }} · accessible {{ s.is_accessible | yesno }} · first seen {{ s.first_seen[:10] }}, last seen {{ s.last_seen[:10] }}</p>
+{% set d = detail %}
+<h1>{{ d.name }} <span class="sub">{{ d.code }}</span></h1>
+<p class="sub">
+  One code of the <a href="/rooms/{{ d.room_slug }}">{{ d.name }}</a> room · {{ d.category or 'uncategorised' }}
+  · accessible {{ d.accessible | yesno }} · max occupancy {{ d.max_occupancy if d.max_occupancy is not none else '?' }}
+  · most seen available {{ d.max_rooms_seen }} · lowest rate seen {{ d.lowest_rate_seen | money }}
+  · first seen {{ d.first_seen[:10] }}, last seen {{ d.last_seen[:10] }}
+</p>
 
-  <h2>Upcoming dates</h2>
-  <p class="sub">Rooms left and cheapest rate for this suite on each upcoming arrival date (latest scrape of each).</p>
-  {% if detail.upcoming %}
-    <div class="panel"><div id="upcoming" class="chart"></div></div>
-  {% else %}
-    <div class="empty">No upcoming dates captured for this suite.</div>
-  {% endif %}
+<h2>Upcoming nights</h2>
+{% if d.upcoming %}
+<div class="grid2">
+  <figure class="fig"><figcaption><strong>Rooms left</strong></figcaption><div id="up-rooms" class="chart small" role="img" aria-label="Rooms left by arrival date"></div></figure>
+  <figure class="fig"><figcaption><strong>Cheapest rate</strong></figcaption><div id="up-rate" class="chart small" role="img" aria-label="Cheapest rate by arrival date"></div></figure>
+</div>
+{{ upcoming_table(d.upcoming) }}
+{% else %}
+<div class="empty">No upcoming nights captured for this code.</div>
+{% endif %}
 
-  <h2>Booking curve</h2>
-  {% if detail.curve_dates %}
-  <form method="get" class="sub">
-    <label>Arrival date
-      <select name="date" onchange="this.form.submit()">
-        {% for d in detail.curve_dates %}<option value="{{ d }}" {{ 'selected' if d == detail.curve_date }}>{{ d }}</option>{% endfor %}
-      </select>
-    </label>
-    · <a href="/date/{{ detail.curve_date }}">all room types for {{ detail.curve_date }}</a>
-  </form>
-  {% endif %}
-  {% if detail.curve %}
-    <div class="panel"><div id="curve" class="chart"></div></div>
-  {% else %}
-    <div class="empty">No snapshots of this suite for {{ detail.curve_date or "that date" }}.</div>
-  {% endif %}
+<h2>Booking curve</h2>
+{% if d.curve_dates %}
+<form method="get" class="toolbar">
+  <label class="label" for="curve-date">Arrival</label>
+  <select id="curve-date" name="date" onchange="this.form.submit()">
+    {% for x in d.curve_dates %}<option value="{{ x }}" {{ 'selected' if x == d.curve_date }}>{{ x | datelong }}</option>{% endfor %}
+  </select>
+  <noscript><button type="submit">Show</button></noscript>
+  <a href="/date/{{ d.curve_date }}">All rooms that night</a>
+</form>
+<div class="grid2">
+  {{ curve_figure("curve-rooms", "Rooms left", "this night vs other nights for this code", d.curve.rooms, d.curve.rooms_band) }}
+  {{ curve_figure("curve-rate", "Rate", "this night vs other nights for this code", d.curve.rate, d.curve.rate_band, money=true) }}
+</div>
+{% else %}
+<div class="empty">No upcoming nights to plot.</div>
+{% endif %}
+<script type="application/json" id="suite-data">{{ {"upcoming": d.upcoming, "curve": d.curve} | tojson }}</script>
+{% endif %}
+{% endblock %}
 
-  <script>
-    const up = {{ detail.upcoming | tojson }};
-    if (up.length) gwtPlot('upcoming', [
-      { type: 'bar', name: 'Rooms left', x: up.map(r => r.arrival_date), y: up.map(r => r.available_room_count),
-        marker: { color: '#2f6f9f' } },
-      { type: 'scatter', mode: 'lines', name: 'Cheapest rate ($)', x: up.map(r => r.arrival_date),
-        y: up.map(r => r.min_total_nightly_rate), yaxis: 'y2', line: { color: '#e5733b' }, connectgaps: false },
-    ], {
-      xaxis: { type: 'date' }, yaxis: { title: { text: 'Rooms left' }, rangemode: 'tozero' },
-      yaxis2: { title: { text: 'Rate ($)' }, overlaying: 'y', side: 'right', showgrid: false },
-      margin: { l: 56, r: 64, t: 12, b: 44 },
-    }, (ev) => { const p = ev.points[0]; if (p) location.href = '/date/' + String(p.x).slice(0, 10); });
-
-    const c = {{ detail.curve | tojson }};
-    if (c.length) gwtPlot('curve', [
-      { type: 'scatter', mode: 'lines+markers', name: 'Rooms left', x: c.map(r => r.scraped_at),
-        y: c.map(r => r.available_room_count), line: { color: '#2f6f9f' } },
-      { type: 'scatter', mode: 'lines+markers', name: 'Cheapest rate ($)', x: c.map(r => r.scraped_at),
-        y: c.map(r => r.min_total_nightly_rate), yaxis: 'y2', line: { color: '#e5733b', dash: 'dot' } },
-    ], {
-      xaxis: { type: 'date', title: { text: 'Scraped' } }, yaxis: { title: { text: 'Rooms left' }, rangemode: 'tozero' },
-      yaxis2: { title: { text: 'Rate ($)' }, overlaying: 'y', side: 'right', showgrid: false },
-      margin: { l: 56, r: 64, t: 12, b: 44 },
-    });
-  </script>
+{% block scripts %}
+{% if detail %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var r = GWT.data("suite-data");
+    var rooms = function (v) { return v == null ? "–" : Math.round(v) + " rooms"; };
+    GWT.redraw = function () {
+      if (r.upcoming.length) {
+        GWT.upcoming("up-rooms", r.upcoming, "rooms_left", "Rooms left", rooms);
+        GWT.upcoming("up-rate", r.upcoming, "cheapest_rate", "Rate", GWT.fmt.money, "$");
+      }
+      if (document.getElementById("curve-rooms")) {
+        GWT.curve("curve-rooms", { points: r.curve.rooms, band: r.curve.rooms_band, yTitle: "Rooms left", zero: true, name: "This night", fmt: rooms });
+        GWT.curve("curve-rate", { points: r.curve.rate, band: r.curve.rate_band, yTitle: "Rate", prefix: "$", name: "This night", fmt: GWT.fmt.money });
+      }
+    };
+    GWT.redraw();
+  });
+</script>
 {% endif %}
 {% endblock %}

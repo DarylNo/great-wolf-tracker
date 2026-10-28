@@ -16,6 +16,9 @@ dependencies = [
     "jinja2>=3.1,<4",
     "apscheduler>=3.10,<4",
     "tzdata>=2024.1",
+    "plotly>=7.1,<8",
+    "holidays>=0.60",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +31,8 @@ gwt = "gwt.cli:main"
 include = ["gwt*"]
 
 [tool.setuptools.package-data]
-"gwt.web" = ["templates/*.html"]
+"gwt" = ["calendar_events.yaml"]
+"gwt.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

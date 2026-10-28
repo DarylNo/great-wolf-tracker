@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}Seasonality · Great Wolf Tracker{% endblock %}
+{% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block content %}
+<h1>How busy is each week of the year?</h1>
+<p class="lede">Two views: how full each week actually ended up (builds up over time), and what Great Wolf's
+current prices say about the next 52 weeks.</p>
+
+{% if not has_data %}
+  {{ nodata() }}
+{% else %}
+<h2>How full each week ends up</h2>
+<p class="lede">Average estimated % sold at arrival, by week of the year, one line per year (latest year in violet).
+A night counts once its last scrape is within {{ status.final_fill_max_lead }} days of arrival, so this fills in one night per day.</p>
+{% if season.final_fill_nights == 0 %}
+  <div class="empty"><strong>No final-fill data yet</strong>
+    0 nights have been scraped within {{ status.final_fill_max_lead }} days of arrival so far. The daily 30-day sweep adds one each day.</div>
+{% else %}
+  <p class="caveat">{{ season.final_fill_nights }} nights so far{% if status.capacity_provisional %} · {{ status.capacity_caveat }}{% endif %}.</p>
+  <div class="grid2">
+    <figure class="fig">
+      <figcaption><strong>Fri–Sat nights</strong></figcaption>
+      <div id="ff-weekend" class="chart small" role="img" aria-label="Average percent sold at arrival by week, Friday and Saturday nights"></div>
+    </figure>
+    <figure class="fig">
+      <figcaption><strong>Sun–Thu nights</strong></figcaption>
+      <div id="ff-weekday" class="chart small" role="img" aria-label="Average percent sold at arrival by week, Sunday to Thursday nights"></div>
+    </figure>
+  </div>
+  <p class="note">Shaded: nights with no school the next morning (Ontario or New York breaks, PA days and public holidays) in the years shown.
+  % sold is estimated against the most rooms ever seen available ({{ status.capacity_est }}).</p>
+  <details class="tableview">
+    <summary>Show as a table</summary>
+    <div class="tablewrap">
+      <table class="data">
+        <thead><tr><th>Nights</th><th class="num">Year</th><th class="num">Week</th><th class="num">Avg % sold at arrival</th><th class="num">Nights</th></tr></thead>
+        <tbody>
+          {% for key in ('weekend', 'weekday') %}{% set panel = season.panels[key] %}
+            {% for s in panel.series %}{% for v in s['values'] %}{% if v is not none %}
+            <tr><td>{{ panel.title }}</td><td class="num">{{ s.year }}</td><td class="num">{{ loop.index }}</td><td class="num">{{ '%.0f' | format(v) }}%</td><td class="num">{{ s.counts[loop.index0] }}</td></tr>
+            {% endif %}{% endfor %}{% endfor %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+{% endif %}
+
+<h2>Forecast from current prices</h2>
+<p class="lede"><strong>Great Wolf raises prices when it expects to be busy.</strong> Average lowest nightly rate per week
+for the next 52 weeks, from the latest scrape of each night, Sun–Thu and Fri–Sat nights separately.
+Sold-out nights have no price, so they're left out of the average (the tooltip counts them).</p>
+<figure class="fig">
+  <div id="forecast" class="chart" role="img" aria-label="Average lowest nightly rate per week for the next 52 weeks"></div>
+  <figcaption>Shaded: nights with no school the next morning (Ontario or New York); multi-night breaks are named, hover a name for every event in it.
+  A ▲ marks a week whose average is off the scale (nearly sold out, so only pricier rooms are left).</figcaption>
+</figure>
+<details class="tableview">
+  <summary>Show as a table</summary>
+  <div class="tablewrap">
+    <table class="data">
+      <thead><tr><th>Week of</th><th class="num">Sun–Thu avg rate</th><th class="num">Sold out</th><th class="num">Fri–Sat avg rate</th><th class="num">Sold out</th></tr></thead>
+      <tbody>
+        {% for w in season.forecast %}
+        <tr><td>{{ w.week_start | datelong }}</td><td class="num">{{ w.weekday | money }}</td><td class="num">{{ w.weekday_sold_out }} of {{ w.weekday_nights }}</td>
+            <td class="num">{{ w.weekend | money }}</td><td class="num">{{ w.weekend_sold_out }} of {{ w.weekend_nights }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+<script type="application/json" id="season-data">{{ season | tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if has_data %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var s = GWT.data("season-data");
+    GWT.redraw = function () {
+      if (s.final_fill_nights) {
+        GWT.finalFill("ff-weekend", s.panels.weekend, s);
+        GWT.finalFill("ff-weekday", s.panels.weekday, s);
+      }
+      GWT.forecast("forecast", s);
+    };
+    GWT.redraw();
+  });
+</script>
+{% endif %}
+{% endblock %}

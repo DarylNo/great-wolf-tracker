@@ -138,12 +138,26 @@ class ScheduleConfig:
         return cls(enabled=enabled, timezone=tz, jobs=tuple(jobs))
 
 
+def parse_nonnegative_int(value: str | None, default: int, name: str) -> int:
+    if value is None or value.strip() == "":
+        return default
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer, got {value!r}") from exc
+    if n < 0:
+        raise ConfigError(f"{name} must be >= 0, got {n}")
+    return n
+
+
 @dataclass(frozen=True)
 class Settings:
     db_path: Path
     host: str
     port: int
     schedule: ScheduleConfig
+    # final_fill counts only if the closest scrape to arrival is at most this many days out.
+    final_fill_max_lead: int = 2
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -153,4 +167,5 @@ class Settings:
             host=env.get("GWT_HOST") or "0.0.0.0",
             port=parse_positive_int(env.get("GWT_PORT"), 8080, "GWT_PORT"),
             schedule=ScheduleConfig.from_env(env),
+            final_fill_max_lead=parse_nonnegative_int(env.get("GWT_FINAL_FILL_MAX_LEAD"), 2, "GWT_FINAL_FILL_MAX_LEAD"),
         )

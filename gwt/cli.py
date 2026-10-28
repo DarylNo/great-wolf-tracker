@@ -1,4 +1,4 @@
-"""Command-line entry point: `python -m gwt sweep|suites|serve`."""
+"""Command-line entry point: `python -m gwt sweep|suites|serve|demo-db`."""
 
 from __future__ import annotations
 
@@ -47,7 +47,51 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=None, help="port (default $GWT_PORT or 8080)")
     serve.add_argument("--db", default=None, help=db_help)
     serve.add_argument("--no-scheduler", action="store_true", help="web only, same as GWT_SCHEDULE_ENABLED=false")
+
+    demo = sub.add_parser("demo-db", help="write a synthetic demo database (never the real one)")
+    demo.add_argument("--out", required=True, help="where to write the demo database")
+    demo.add_argument("--weeks", type=int, default=60, help="weeks of weekly full sweeps to simulate (default 60)")
+    demo.add_argument("--seed", type=int, default=7, help="random seed (default 7)")
+    demo.add_argument("--force", action="store_true", help="replace an existing demo database at --out")
     return parser
+
+
+# Paths the real database lives at; demo-db refuses to write to any of them.
+REAL_DB_PATHS = ("data/gwl.db", "/app/data/gwl.db")
+
+
+def real_db_paths() -> set[Path]:
+    paths = {Path(p).resolve() for p in REAL_DB_PATHS}
+    if os.environ.get("GWT_DB"):
+        paths.add(Path(os.environ["GWT_DB"]).resolve())
+    return paths
+
+
+def cmd_demo_db(args: argparse.Namespace) -> int:
+    from gwt.demo import build_demo_db, is_demo_db
+
+    out = Path(args.out).resolve()
+    if out in real_db_paths():
+        logging.error("refusing to write the demo database to the real database path %s", out)
+        return EXIT_USAGE
+    if args.weeks < 1:
+        logging.error("--weeks must be >= 1")
+        return EXIT_USAGE
+    if out.exists():
+        if not args.force:
+            logging.error("%s already exists (use --force to replace an earlier demo database)", out)
+            return EXIT_USAGE
+        if not is_demo_db(out):
+            logging.error("%s is not a demo database; refusing to overwrite it", out)
+            return EXIT_USAGE
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{out}{suffix}").unlink(missing_ok=True)
+    result = build_demo_db(out, weeks=args.weeks, seed=args.seed, progress=logging.info)
+    logging.info(
+        "demo database written to %s: %d sweeps, %d snapshots, %d suite rows (synthetic data)",
+        out, result["sweeps"], result["snapshots"], result["suite_snapshots"],
+    )
+    return 0
 
 
 def _fmt_rate(value: float | None) -> str:
@@ -162,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_suites(args)
     if args.command == "serve":
         return cmd_serve(args)
+    if args.command == "demo-db":
+        return cmd_demo_db(args)
     return EXIT_USAGE
 
 

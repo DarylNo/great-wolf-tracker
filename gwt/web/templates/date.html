@@ -1,61 +1,107 @@
 {% extends "base.html" %}
-{% from "_macros.html" import nodata %}
-{% block title %}{{ arrival }} · Great Wolf Tracker{% endblock %}
+{% from "_macros.html" import nodata, event_tags, curve_figure %}
+{% block title %}{{ arrival.isoformat() }} · Great Wolf Tracker{% endblock %}
+{% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
-<h1>Arrival {{ arrival }}</h1>
+<h1>{{ arrival.isoformat() | datelong }}</h1>
 
 {% if not has_data %}
   {{ nodata() }}
 {% elif detail is none %}
-  <div class="empty"><strong>No snapshots for this date yet</strong>Sweeps cover the next 365 days from the day they run. <a href="/">Back to overview</a></div>
+  <div class="empty"><strong>No snapshots for this night yet</strong>
+    Sweeps cover the next 365 days from the day they run. <a href="/">Back to the plan</a></div>
 {% else %}
-  {% set s = detail.snapshot %}
-  <p class="sub">Latest scrape {{ s.scraped_at }} (run {{ s.run_id }}). 1 night, 2 adults.</p>
-  <div class="stats">
-    <div class="stat"><div class="v">{{ s.demand if s.demand is not none else "-" }}</div><div class="k">demand index</div></div>
-    <div class="stat"><div class="v">{{ s.total_rooms_available }}</div><div class="k">rooms left</div></div>
-    <div class="stat"><div class="v">{{ s.suite_types_sold_out }}/{{ s.suite_types }}</div><div class="k">suite types sold out</div></div>
-    <div class="stat"><div class="v">{{ s.min_rate | money }}</div><div class="k">lowest available rate</div></div>
-    <div class="stat"><div class="v">{{ s.ref_suite_rate | money }}</div><div class="k">reference suite (SFSSB)</div></div>
-  </div>
-  {% if s.error_code %}<p><span class="badge bad">API error code: {{ s.error_code }}</span></p>{% endif %}
+{% set d = detail %}
+<p class="caveat">Latest scrape {{ d.scraped_local }} (Toronto) · 1 night, 2 adults.</p>
+{{ event_tags(d.school_closure, d.info_tags) }}
 
-  <h2>Room types</h2>
-  <div class="tablewrap"><table>
-    <tr>
-      <th>Suite</th><th>Category</th><th class="num">Max occ.</th><th>Accessible</th><th class="num">Rooms left</th>
-      {% for f in detail.families %}<th class="num">{{ f }}</th>{% endfor %}
-      <th></th>
-    </tr>
-    {% for r in detail.suites %}
-    <tr class="{{ 'soldout' if r.sold_out }}">
-      <td><a href="/suites/{{ r.suite_code }}?date={{ arrival }}">{{ r.suite_name }}</a> <span class="sub">{{ r.suite_code }}</span></td>
-      <td>{{ r.suite_category or "-" }}</td>
-      <td class="num">{{ r.max_occupancy if r.max_occupancy is not none else "-" }}</td>
-      <td>{{ r.is_accessible | yesno }}</td>
-      <td class="num">{{ r.available_room_count }}</td>
-      {% for f in detail.families %}<td class="num">{{ r.rates.get(f) | money }}</td>{% endfor %}
-      <td>{% if r.sold_out %}<span class="badge bad">Sold out</span>{% endif %}</td>
-    </tr>
+<div class="tiles">
+  <div class="tile"><div class="k">Rooms left</div>
+    <div class="v">{{ 'Sold out' if d.sold_out else d.rooms_left }}</div>
+    <div class="s">{{ d.pct_sold | pct }} sold (est.)</div></div>
+  <div class="tile"><div class="k">Lowest rate</div>
+    <div class="v">{{ d.min_rate | money }}</div><div class="s">per night, no offer code</div></div>
+  <div class="tile"><div class="k">Reference rate</div>
+    <div class="v">{{ d.ref_rate | money }}</div><div class="s">{{ ref_label }}</div></div>
+  <div class="tile"><div class="k">Room types fully sold</div>
+    <div class="v">{{ d.room_types_sold_out }} of {{ d.room_types }}</div><div class="s">rooms, all variants at 0</div></div>
+  <div class="tile"><div class="k">{{ 'Days until arrival' if d.days_until >= 0 else 'Arrival was' }}</div>
+    <div class="v">{{ d.days_until if d.days_until >= 0 else (-d.days_until) ~ ' days ago' }}</div>
+    <div class="s">{{ d.lead_days }} days out at the last scrape</div></div>
+  <div class="tile"><div class="k">Pace</div>
+    <div class="v">{{ d.pace_pct | pace_rank }}</div>
+    <div class="s">{% if d.pace_pct is not none %}percentile {{ pace_label }}{% else %}n/a: {{ d.pace_bucket_size }} snapshots at this days-out (needs 20){% endif %}</div></div>
+  <div class="tile"><div class="k">Sold in the last 7 days</div>
+    <div class="v">{{ d.pickup_7d | signed }}</div><div class="s">{{ 'rooms' if d.pickup_7d is not none else 'needs a scrape 6–8 days earlier' }}</div></div>
+</div>
+
+<h2>Room types</h2>
+<p class="rule">Suite codes grouped into rooms; expand one for its variants. Sorted by category, then by each room's usual price (its lowest rate seen), so sold-out rooms keep their place, greyed out. Rates are the cheapest per rate family among variants that still have rooms.</p>
+<div class="tablewrap limit">
+  <div class="rooms" style="--fams: {{ [d.families | length, 1] | max }}">
+    <div class="hdr">
+      <span>Room</span><span class="c-cat">Category</span><span class="num c-occ">Max occ.</span><span class="num">Rooms left</span><span class="num c-acc">Accessible left</span>
+      {% for f in d.families %}<span class="num">{{ f }}</span>{% else %}<span class="num">Rate</span>{% endfor %}<span class="c-badge"></span>
+    </div>
+    {% for r in d.rooms %}
+    <details class="{{ 'soldout' if r.sold_out }}">
+      <summary>
+        <span class="name"><a href="/rooms/{{ r.slug }}?date={{ d.arrival_date }}">{{ r.name }}</a></span>
+        <span class="c-cat">{{ r.category or '–' }}</span>
+        <span class="num c-occ">{{ r.occupancy }}</span>
+        <span class="num">{{ r.rooms_left }}</span>
+        <span class="num c-acc">{{ r.accessible_rooms_left if r.has_accessible else '–' }}</span>
+        {% for f in d.families %}<span class="num">{{ r.rates[f] | money }}</span>{% else %}<span class="num">{{ r.cheapest | money }}</span>{% endfor %}
+        <span class="c-badge">{% if r.sold_out %}<span class="badge so">Sold out</span>{% endif %}</span>
+      </summary>
+      <div class="tablewrap">
+      <table class="data variants">
+        <thead><tr><th>Code</th><th>Accessible</th><th class="num">Beds</th><th class="num">Baths</th><th class="num">Max occ.</th><th class="num">Rooms left</th>
+          {% for f in d.families %}<th class="num">{{ f }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for v in r.variants %}
+          <tr class="{{ 'soldout' if v.sold_out }}">
+            <td><a href="/suites/{{ v.code }}?date={{ d.arrival_date }}">{{ v.code }}</a></td>
+            <td>{{ v.accessible | yesno }}</td>
+            <td class="num">{{ v.beds if v.beds is not none else '–' }}</td>
+            <td class="num">{{ v.baths if v.baths is not none else '–' }}</td>
+            <td class="num">{{ v.max_occupancy if v.max_occupancy is not none else '–' }}</td>
+            <td class="num">{{ v.rooms_left }}</td>
+            {% for f in d.families %}<td class="num">{{ v.rates[f] | money }}</td>{% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </details>
     {% endfor %}
-  </table></div>
+  </div>
+</div>
 
-  <h2>Booking curve</h2>
-  <p class="sub">Total rooms left and lowest rate at each scrape of this date ({{ detail.curve | length }} so far).</p>
-  <div class="panel"><div id="curve" class="chart"></div></div>
-  <script>
-    const c = {{ detail.curve | tojson }};
-    gwtPlot('curve', [
-      { type: 'scatter', mode: 'lines+markers', name: 'Rooms left', x: c.map(r => r.scraped_at),
-        y: c.map(r => r.total_rooms_available), line: { color: '#2f6f9f' } },
-      { type: 'scatter', mode: 'lines+markers', name: 'Min rate ($)', x: c.map(r => r.scraped_at),
-        y: c.map(r => r.min_rate), yaxis: 'y2', line: { color: '#e5733b', dash: 'dot' } },
-    ], {
-      xaxis: { type: 'date', title: { text: 'Scraped' } },
-      yaxis: { title: { text: 'Rooms left' }, rangemode: 'tozero' },
-      yaxis2: { title: { text: 'Min rate ($)' }, overlaying: 'y', side: 'right', showgrid: false },
-      margin: { l: 56, r: 64, t: 12, b: 44 },
-    });
-  </script>
+<h2>Booking curve</h2>
+<p class="lede">How this night has filled and priced as it got closer, against the middle 80% (and median) of every other
+night at the same days-out. Time runs left to right towards arrival.</p>
+<div class="grid2">
+  {{ curve_figure("curve-rooms", "Rooms left", "this night vs other nights", d.curve.rooms, d.curve.rooms_band) }}
+  {{ curve_figure("curve-rate", "Lowest rate", "this night vs other nights", d.curve.rate, d.curve.rate_band, money=true) }}
+</div>
+<script type="application/json" id="curve-data">{{ d.curve | tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if detail %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var c = GWT.data("curve-data");
+    GWT.redraw = function () {
+      GWT.curve("curve-rooms", { points: c.rooms, band: c.rooms_band, yTitle: "Rooms left", zero: true, name: "This night",
+                                 fmt: function (v) { return v == null ? "–" : Math.round(v) + " rooms"; } });
+      GWT.curve("curve-rate", { points: c.rate, band: c.rate_band, yTitle: "Lowest nightly rate", prefix: "$", name: "This night",
+                                fmt: GWT.fmt.money });
+    };
+    GWT.redraw();
+  });
+</script>
 {% endif %}
 {% endblock %}

@@ -20,9 +20,9 @@
 {% if not has_data %}
   {{ nodata("No sweeps have been logged.") }}
 {% else %}
-  <div class="tablewrap"><table>
-    <tr><th>Run ID</th><th>Trigger</th><th>Started (UTC)</th><th>Finished (UTC)</th><th class="num">Days</th>
-        <th class="num">Fetched</th><th class="num">Skipped</th><th class="num">Failed dates</th><th class="num">Failed requests</th><th>Status</th></tr>
+  <div class="tablewrap limit"><table class="data">
+    <thead><tr><th>Run ID</th><th>Trigger</th><th>Started (UTC)</th><th>Finished (UTC)</th><th class="num">Days</th>
+        <th class="num">Fetched</th><th class="num">Skipped</th><th class="num">Failed dates</th><th class="num">Failed requests</th><th>Status</th></tr></thead>
     {% for r in runs %}
     <tr>
       <td>{{ r.run_id }}</td><td>{{ r.trigger or "-" }}</td><td>{{ r.started_at }}</td><td>{{ r.finished_at or "-" }}</td>

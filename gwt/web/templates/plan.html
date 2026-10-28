@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}Plan · Great Wolf Tracker{% endblock %}
+{% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block content %}
+<h1>When should we go?</h1>
+<p class="lede">Every night for the next 12 months at Great Wolf Lodge Niagara, from the latest scrape of each date.
+Click a night for its room types and booking curve.</p>
+
+{% if not has_data %}
+  {{ nodata() }}
+{% else %}
+<p class="caveat">
+  Last scrape {{ status.last_scrape_local }} (Toronto) · {{ plan.nights_with_data }} of 365 nights captured ·
+  capacity estimate {{ status.capacity_est }} rooms{% if status.capacity_provisional %} ({{ status.capacity_caveat }}){% endif %}.
+</p>
+
+<section class="calblock" aria-label="Calendar of upcoming nights">
+  <input type="radio" class="vh" name="metric" id="m-price" value="price" {{ 'checked' if metric == 'price' }}>
+  <input type="radio" class="vh" name="metric" id="m-rooms" value="rooms" {{ 'checked' if metric == 'rooms' }}>
+  <input type="radio" class="vh" name="metric" id="m-pace" value="pace" {{ 'checked' if metric == 'pace' }}>
+  <div class="toolbar">
+    <span class="label" id="colour-by">Colour by</span>
+    <div class="seg" role="group" aria-labelledby="colour-by">
+      <label for="m-price">Price</label><label for="m-rooms">Rooms left</label><label for="m-pace">Pace</label>
+    </div>
+  </div>
+  <p class="note">{{ lead_caption }}</p>
+  <div class="legend">
+    <span class="ramp lg-price"><span class="end">Lowest rate: cheaper</span>
+      {% for b in plan.scales.price %}<span class="sw s{{ b.step }}">{{ b.label }}</span>{% endfor %}
+      <span class="end">pricier</span></span>
+    <span class="ramp lg-rooms"><span class="end">Rooms left: more</span>
+      {% for b in plan.scales.rooms %}<span class="sw s{{ b.step }}">{{ b.label }}</span>{% endfor %}
+      <span class="end">fewer</span></span>
+    <span class="ramp lg-pace"><span class="end">Pace percentile: slower</span>
+      {% for b in plan.scales.pace %}<span class="sw s{{ b.step }}">{{ b.label }}</span>{% endfor %}
+      <span class="end">faster (vs other dates at the same days-out; n/a = grey)</span></span>
+    <span class="key"><span class="swatch so"></span>Sold out</span>
+    <span class="key"><span class="swatch nd"></span>No data</span>
+    <span class="key"><span class="swatch ev"></span>No school next day</span>
+    <span class="key"><span class="swatch today"></span>Today</span>
+  </div>
+
+  <div class="months">
+    {% for m in plan.months %}
+    <div class="month">
+      <h3>{{ m.title }}</h3>
+      <div class="dow" aria-hidden="true"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div>
+      <div class="days">
+        {% for c in m.cells %}
+          {% if c is none %}<span class="day blank"></span>
+          {% elif c.state != 'in' %}<span class="day {{ c.state }}"><span class="n">{{ c.day }}</span></span>
+          {% else %}
+            {% set n = c.night %}
+            {% set label = n.tip | replace('\t', ' ') | replace('\n', '; ') %}
+            {% if n.has_data %}
+            <a class="day p{{ n.steps.price if n.steps.price is not none else 'x' }} r{{ n.steps.rooms }} a{{ n.steps.pace if n.steps.pace is not none else 'x' }}{{ ' so' if n.sold_out }}{{ ' ev' if n.closure }}{{ ' today' if c.today }}"
+               href="/date/{{ c.date }}" data-tip="{{ n.tip }}" aria-label="{{ label }}">
+              <span class="n">{{ c.day }}</span>
+              <span class="v">{% if n.sold_out %}Sold out{% else %}<span class="vp">{{ n.cell.price }}</span><span class="vr">{{ n.cell.rooms }}</span><span class="va">{{ n.cell.pace }}</span>{% endif %}</span>
+            </a>
+            {% else %}
+            <a class="day nd{{ ' ev' if n.closure }}{{ ' today' if c.today }}" href="/date/{{ c.date }}" data-tip="{{ n.tip }}" aria-label="{{ label }}">
+              <span class="n">{{ c.day }}</span><span class="v">–</span>
+            </a>
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<h2>Price against availability</h2>
+<p class="lede">One dot per upcoming night: the lowest nightly rate against rooms left (or pace). Diamonds are nights with no school the next morning.</p>
+<div id="scatter-block">
+  <div class="toolbar">
+    <span class="label">Y axis</span>
+    <div class="seg" role="group" aria-label="Y axis">
+      <button type="button" data-ctl="y" value="rooms" aria-pressed="true">Rooms left</button><button type="button" data-ctl="y" value="pace" aria-pressed="false">Pace</button>
+    </div>
+    <span class="label" id="days-ahead">Days ahead</span>
+    <div class="seg" role="group" aria-labelledby="days-ahead">
+      {% for w in (30, 60, 90, 180, 365) %}<button type="button" data-ctl="window" value="{{ w }}" aria-pressed="{{ 'true' if w == 90 else 'false' }}">{{ w }}</button>{% endfor %}
+    </div>
+    <span class="label">Nights</span>
+    <div class="seg" role="group" aria-label="Nights">
+      <button type="button" data-ctl="nights" value="all" aria-pressed="true">All</button><button type="button" data-ctl="nights" value="weekday" aria-pressed="false">Sun–Thu</button><button type="button" data-ctl="nights" value="weekend" aria-pressed="false">Fri–Sat</button>
+    </div>
+  </div>
+  <div id="scatter" class="chart tall" role="img" aria-label="Scatter of lowest nightly rate against rooms left for upcoming nights"></div>
+  <p class="chart-note"></p>
+  <details class="tableview">
+    <summary>Show as a table</summary>
+    <div class="tablewrap">
+      <table class="data">
+        <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">Pace</th><th>No school next day</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </details>
+</div>
+<script type="application/json" id="scatter-data">{{ plan.scatter | tojson }}</script>
+
+<div class="grid2">
+  <section>
+    <h2>Cheapest upcoming nights</h2>
+    <p class="rule">{{ plan_rules.cheapest }}</p>
+    <div class="tablewrap limit-sm">
+      <table class="data">
+        <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">% sold</th><th></th></tr></thead>
+        <tbody>
+          {% for n in plan.cheapest %}
+          <tr>
+            <td><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a></td>
+            <td class="num">{{ n.min_rate | money }}</td>
+            <td class="num">{{ n.rooms_left }}</td>
+            <td class="num">{{ n.pct_sold | pct }}</td>
+            <td>{% if n.closure %}<span class="tag"><span class="dot" aria-hidden="true"></span>No school next day</span>{% endif %}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="sub">No priced nights yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <section>
+    <h2>Filling fastest</h2>
+    <p class="rule">{{ plan_rules.filling }}</p>
+    <div class="tablewrap limit-sm">
+      <table class="data">
+        <thead><tr><th>Night</th><th class="num">Sold last 7 days</th><th class="num">Pace</th><th class="num">Rooms left</th><th class="num">Lowest rate</th></tr></thead>
+        <tbody>
+          {% for n in plan.filling %}
+          <tr>
+            <td><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a></td>
+            <td class="num">{{ (n.pickup_7d | signed) ~ ' rooms' if n.pickup_7d is not none else 'n/a' }}</td>
+            <td class="num">{{ n.pace_pct | pace_rank }}</td>
+            <td class="num">{{ n.rooms_left }}</td>
+            <td class="num">{{ n.min_rate | money }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="sub">Needs a scrape 6–8 days earlier, or 20+ snapshots at the same days-out for pace.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<p class="note">
+  Pace is the percentile of % sold {{ pace_label }} (n/a until 20 snapshots exist at that days-out).
+  % sold is estimated against the most rooms ever seen available ({{ status.capacity_est }}).
+</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if has_data %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    GWT.planScatter({ root: "scatter-block", chart: "scatter", points: GWT.data("scatter-data") });
+  });
+</script>
+{% endif %}
+{% endblock %}

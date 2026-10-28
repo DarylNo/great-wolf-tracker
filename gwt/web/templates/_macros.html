@@ -2,7 +2,62 @@
 <div class="empty">
   <strong>No data yet</strong>
   {{ what }}
-  Data appears after the first sweep. It runs on schedule (see <a href="/runs">Runs</a>), or start one by hand with
+  Data appears after the first sweep. It runs on the schedule (see <a href="/runs">Runs</a>), or start one by hand with
   <code>docker compose exec gwt python -m gwt sweep --days 30</code>.
 </div>
+{% endmacro %}
+
+{% macro event_tags(closures, info=[]) %}
+{% if closures or info %}
+<div class="tags">
+  {% for text in closures %}<span class="tag"><span class="dot" aria-hidden="true"></span>No school next day · {{ text }}</span>{% endfor %}
+  {% for text in info %}<span class="tag">{{ text }}</span>{% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+
+{# A booking-curve figure: chart + a table-view twin with the same numbers. #}
+{% macro curve_figure(id, title, caption, points, band, money=false) %}
+<figure class="fig">
+  <figcaption><strong>{{ title }}</strong> · {{ caption }}</figcaption>
+  <div id="{{ id }}" class="chart small" role="img" aria-label="{{ title }} by days before arrival"></div>
+  <details class="tableview">
+    <summary>Show as a table</summary>
+    <div class="tablewrap">
+      <table class="data">
+        <thead><tr><th class="num">Days out</th><th>Scraped</th><th class="num">This date</th><th class="num">Other dates: median</th><th class="num">10–90%</th></tr></thead>
+        <tbody>
+          {% for p in points %}
+          {% set b = band[p.bucket] if p.bucket is not none else none %}
+          <tr>
+            <td class="num">{{ p.lead }}</td><td>{{ p.label }}</td>
+            <td class="num">{{ (p.value | money) if money else (p.value if p.value is not none else '–') }}</td>
+            {% if b %}
+            <td class="num">{{ (b.p50 | money) if money else ('%.0f' | format(b.p50)) }}</td>
+            <td class="num">{{ (b.p10 | money0) if money else ('%.0f' | format(b.p10)) }}–{{ (b.p90 | money0) if money else ('%.0f' | format(b.p90)) }}</td>
+            {% else %}<td class="num">–</td><td class="num">–</td>{% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+</figure>
+{% endmacro %}
+
+{# Table-view twin for the "upcoming nights" charts on the room and suite-code pages. #}
+{% macro upcoming_table(rows) %}
+<details class="tableview">
+  <summary>Show as a table</summary>
+  <div class="tablewrap">
+    <table class="data">
+      <thead><tr><th>Night</th><th class="num">Rooms left</th><th class="num">Cheapest rate</th></tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr><td><a href="/date/{{ r.date }}">{{ r.date | datelong }}</a></td><td class="num">{{ r.rooms_left }}</td><td class="num">{{ r.cheapest_rate | money }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
 {% endmacro %}

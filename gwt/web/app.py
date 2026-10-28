@@ -1,36 +1,54 @@
-"""FastAPI app: HTML dashboard pages, JSON API under /api, and /healthz."""
+"""FastAPI app: dashboard pages, JSON API under /api, /healthz, and static assets."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime
+from importlib import metadata, resources
 from pathlib import Path
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.gzip import GZipMiddleware
 
 from gwt import __version__, db
+from gwt import metrics as M
 from gwt.config import Settings
 from gwt.scheduler import build_scheduler, describe
-from gwt.web import data
+from gwt.web import data, fmt
 
 log = logging.getLogger("gwt.web")
 
-TEMPLATES_DIR = Path(__file__).parent / "templates"
-PLOTLY_JS = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
+WEB_DIR = Path(__file__).parent
+TEMPLATES_DIR = WEB_DIR / "templates"
+STATIC_DIR = WEB_DIR / "static"
 
 
-def _money(value) -> str:
-    return "-" if value is None else f"${value:,.2f}"
+def plotly_js_path() -> Path | None:
+    """plotly.min.js bundled with the `plotly` pip package, served locally (works offline)."""
+    try:
+        path = Path(str(resources.files("plotly") / "package_data" / "plotly.min.js"))
+    except ModuleNotFoundError:
+        return None
+    return path if path.exists() else None
 
 
-def _yesno(value) -> str:
-    return "?" if value is None else ("yes" if value else "no")
+def _asset_version() -> str:
+    h = hashlib.sha256()
+    for p in sorted(STATIC_DIR.glob("*")):
+        h.update(p.read_bytes())
+    try:
+        h.update(metadata.version("plotly").encode())
+    except metadata.PackageNotFoundError:
+        pass
+    return h.hexdigest()[:10]
 
 
 def _parse_date(value: str) -> date:
@@ -38,6 +56,21 @@ def _parse_date(value: str) -> date:
         return date.fromisoformat(value)
     except ValueError:
         raise HTTPException(status_code=404, detail=f"not a date: {value!r} (use YYYY-MM-DD)")
+
+
+def _iso_label(value: str | None) -> str:
+    return fmt.date_long(date.fromisoformat(value)) if value else "–"
+
+
+PLAN_NIGHT_FIELDS = (
+    "date", "weekday", "weekend", "has_data", "rooms_left", "pct_sold", "min_rate", "ref_rate", "sold_out",
+    "lead_days", "scraped_on", "pace_pct", "pickup_7d", "room_types_sold_out", "room_types", "school_closure",
+)
+
+
+def _api_night(n: dict) -> dict:
+    """Every field on every night (null where a night has no data yet)."""
+    return {k: n.get(k) for k in PLAN_NIGHT_FIELDS}
 
 
 def create_app(
@@ -50,11 +83,12 @@ def create_app(
     run_scheduler = settings.schedule.enabled if enable_scheduler is None else enable_scheduler
     tz = ZoneInfo(settings.schedule.timezone)
     today_fn = today or (lambda: datetime.now(tz).date())
+    stats_key = str(settings.db_path.resolve())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if settings.db_path.exists():
-            db.connect(settings.db_path).close()  # apply schema migrations once
+            db.connect(settings.db_path).close()  # apply schema migrations / new indexes once
         scheduler = build_scheduler(settings.schedule, settings.db_path) if run_scheduler else None
         if scheduler:
             scheduler.start()
@@ -72,12 +106,24 @@ def create_app(
     app = FastAPI(title="Great Wolf Tracker", version=__version__, lifespan=lifespan)
     app.state.scheduler = None
     app.state.settings = settings
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    templates.env.filters["money"] = _money
-    templates.env.filters["yesno"] = _yesno
-    templates.env.globals["plotly_js"] = PLOTLY_JS
-    templates.env.globals["version"] = __version__
+    env = templates.env
+    env.filters.update(
+        money=fmt.money, money0=fmt.money0, pct=fmt.pct, pace_rank=fmt.pace_rank, pace=fmt.pace, yesno=fmt.yesno,
+        signed=fmt.signed, datelong=_iso_label, localtime=data.local_time,
+    )
+    env.globals.update(
+        version=__version__,
+        asset_version=_asset_version(),
+        pace_label=M.PACE_LABEL,
+        price_footnote=M.PRICE_FOOTNOTE,
+        ref_label=data.REF_SUITE_LABEL,
+        lead_caption=data.LEAD_CAPTION,
+        plan_rules={"cheapest": data.CHEAPEST_RULE, "filling": data.FILLING_RULE},
+    )
+    plotly_path = plotly_js_path()
 
     @contextmanager
     def open_db() -> Iterator[sqlite3.Connection | None]:
@@ -88,34 +134,69 @@ def create_app(
             if conn is not None:
                 conn.close()
 
-    def page(request: Request, template: str, status_code: int = 200, **ctx) -> HTMLResponse:
-        return templates.TemplateResponse(request, template, {"active": template, **ctx}, status_code=status_code)
+    def stats_for(conn: sqlite3.Connection) -> data.Stats:
+        return data.get_stats(conn, stats_key, settings.final_fill_max_lead)
+
+    def page(request: Request, template: str, conn, status_code: int = 200, **ctx) -> HTMLResponse:
+        base = {"active": template, "demo": data.is_demo(conn), "today": today_fn()}
+        return templates.TemplateResponse(request, template, {**base, **ctx}, status_code=status_code)
 
     # ------------------------------------------------------------------ HTML pages
 
     @app.get("/", response_class=HTMLResponse)
-    def overview_page(request: Request):
+    def plan_page(request: Request, metric: str = "price"):
+        metric = metric if metric in ("price", "rooms", "pace") else "price"
         with open_db() as conn:
             if not data.has_data(conn):
-                return page(request, "overview.html", has_data=False)
-            ov = data.overview(conn, today_fn())
-            return page(request, "overview.html", has_data=True, ov=ov, hist=data.history(conn))
+                return page(request, "plan.html", conn, has_data=False, metric=metric)
+            stats = stats_for(conn)
+            return page(request, "plan.html", conn, has_data=True, metric=metric,
+                        plan=data.plan(conn, stats, today_fn()), status=data.status(stats))
+
+    @app.get("/seasonality", response_class=HTMLResponse)
+    def seasonality_page(request: Request):
+        with open_db() as conn:
+            if not data.has_data(conn):
+                return page(request, "seasonality.html", conn, has_data=False)
+            stats = stats_for(conn)
+            return page(request, "seasonality.html", conn, has_data=True,
+                        season=data.seasonality(stats, today_fn()), status=data.status(stats))
+
+    @app.get("/trends")
+    def trends_redirect():
+        return RedirectResponse("/seasonality", status_code=301)
 
     @app.get("/date/{arrival}", response_class=HTMLResponse)
     def date_page(request: Request, arrival: str):
         d = _parse_date(arrival)
         with open_db() as conn:
             if not data.has_data(conn):
-                return page(request, "date.html", has_data=False, arrival=d.isoformat(), detail=None)
-            detail = data.date_detail(conn, d, today_fn())
-            return page(request, "date.html", has_data=True, arrival=d.isoformat(), detail=detail)
+                return page(request, "date.html", conn, has_data=False, arrival=d, detail=None)
+            stats = stats_for(conn)
+            detail = data.date_detail(conn, stats, d, today_fn())
+            return page(request, "date.html", conn, has_data=True, arrival=d, detail=detail,
+                        status=data.status(stats))
 
     @app.get("/suites", response_class=HTMLResponse)
-    def suites_page(request: Request):
+    def suites_page(request: Request, window: int = data.MATRIX_DEFAULT_WINDOW):
+        window = window if window in data.MATRIX_WINDOWS else data.MATRIX_DEFAULT_WINDOW
         with open_db() as conn:
             if not data.has_data(conn):
-                return page(request, "suites.html", has_data=False)
-            return page(request, "suites.html", has_data=True, suites=data.suites_list(conn))
+                return page(request, "suites.html", conn, has_data=False, window=window)
+            stats = stats_for(conn)
+            return page(request, "suites.html", conn, has_data=True, window=window,
+                        rooms=data.rooms_overview(conn, stats),
+                        matrix=data.room_matrix(conn, stats, today_fn(), window))
+
+    @app.get("/rooms/{slug}", response_class=HTMLResponse)
+    def room_page(request: Request, slug: str, date: str | None = None):
+        curve_date = _parse_date(date) if date else None
+        with open_db() as conn:
+            if not data.has_data(conn):
+                return page(request, "room.html", conn, has_data=False, slug=slug, detail=None)
+            detail = data.room_detail(conn, stats_for(conn), slug, today_fn(), curve_date)
+            return page(request, "room.html", conn, status_code=200 if detail else 404, has_data=True,
+                        slug=slug, detail=detail)
 
     @app.get("/suites/{code}", response_class=HTMLResponse)
     def suite_page(request: Request, code: str, date: str | None = None):
@@ -123,71 +204,108 @@ def create_app(
         code = code.upper()
         with open_db() as conn:
             if not data.has_data(conn):
-                return page(request, "suite.html", has_data=False, code=code, detail=None)
-            detail = data.suite_detail(conn, code, today_fn(), curve_date)
-            if detail is None:
-                return page(request, "suite.html", status_code=404, has_data=True, code=code, detail=None)
-            return page(request, "suite.html", has_data=True, code=code, detail=detail)
+                return page(request, "suite.html", conn, has_data=False, code=code, detail=None)
+            detail = data.suite_detail(conn, stats_for(conn), code, today_fn(), curve_date)
+            return page(request, "suite.html", conn, status_code=200 if detail else 404, has_data=True,
+                        code=code, detail=detail)
 
     @app.get("/runs", response_class=HTMLResponse)
     def runs_page(request: Request):
         with open_db() as conn:
             runs = data.runs(conn) if conn is not None else []
-            return page(
-                request,
-                "runs.html",
-                has_data=bool(runs),
-                runs=runs,
-                schedule=settings.schedule,
-                jobs=describe(app.state.scheduler),
-            )
-
-    @app.get("/trends", response_class=HTMLResponse)
-    def trends_page(request: Request):
-        with open_db() as conn:
-            if not data.has_data(conn):
-                return page(request, "trends.html", has_data=False)
-            return page(request, "trends.html", has_data=True, hist=data.history(conn))
+            return page(request, "runs.html", conn, has_data=bool(runs), runs=runs, schedule=settings.schedule,
+                        jobs=describe(app.state.scheduler))
 
     # ------------------------------------------------------------------ JSON API
 
-    @app.get("/api/overview")
-    def api_overview():
+    @app.get("/api/plan")
+    def api_plan():
         with open_db() as conn:
             if not data.has_data(conn):
-                return {"has_data": False, "dates": []}
-            ov = data.overview(conn, today_fn())
-            return {"has_data": True, "start": ov["start"], "end": ov["end"], "dates": ov["dates"],
-                    "quietest": ov["quietest"], "busiest": ov["busiest"]}
+                return {"has_data": False, "nights": []}
+            stats = stats_for(conn)
+            p = data.plan(conn, stats, today_fn())
+            return {
+                "has_data": True,
+                "start": p["start"],
+                "end": p["end"],
+                "status": data.status(stats),
+                "definitions": {"price": "min_rate: lowest available nightly rate", "pace": M.PACE_LABEL,
+                                "price_note": M.PRICE_FOOTNOTE},
+                "nights": [_api_night(n) for n in p["nights"]],
+                "cheapest_nights": {"rule": data.CHEAPEST_RULE, "nights": [_api_night(n) for n in p["cheapest"]]},
+                "filling_fastest": {"rule": data.FILLING_RULE, "nights": [_api_night(n) for n in p["filling"]]},
+            }
 
-    @app.get("/api/trends")
-    def api_trends():
+    @app.get("/api/seasonality")
+    def api_seasonality():
         with open_db() as conn:
             if not data.has_data(conn):
-                return {"has_data": False, "years": [], "weeks": [], "z": []}
-            return {"has_data": True, **data.history(conn)}
+                return {"has_data": False, "final_fill_nights": 0, "panels": {}, "forecast": []}
+            stats = stats_for(conn)
+            return {"has_data": True, "status": data.status(stats), **data.seasonality(stats, today_fn())}
 
     @app.get("/api/dates/{arrival}")
     def api_date(arrival: str):
         d = _parse_date(arrival)
         with open_db() as conn:
-            detail = data.date_detail(conn, d, today_fn()) if data.has_data(conn) else None
+            detail = data.date_detail(conn, stats_for(conn), d, today_fn()) if data.has_data(conn) else None
             if detail is None:
                 return JSONResponse({"has_data": False, "arrival_date": d.isoformat()}, status_code=404)
-            return {"has_data": True, "arrival_date": d.isoformat(), **detail}
+            return {"has_data": True, **detail}
+
+    @app.get("/api/rooms")
+    def api_rooms():
+        with open_db() as conn:
+            if not data.has_data(conn):
+                return {"has_data": False, "rooms": []}
+            return {"has_data": True, "rooms": data.rooms_overview(conn, stats_for(conn))}
+
+    @app.get("/api/rooms/matrix")
+    def api_room_matrix(window: int = data.MATRIX_DEFAULT_WINDOW):
+        window = window if window in data.MATRIX_WINDOWS else data.MATRIX_DEFAULT_WINDOW
+        with open_db() as conn:
+            if not data.has_data(conn):
+                return {"has_data": False, "window": window, "dates": [], "rooms": []}
+            m = data.room_matrix(conn, stats_for(conn), today_fn(), window)
+            return {
+                "has_data": True,
+                "window": window,
+                "dates": [c["date"] for c in m["columns"]],
+                "rooms": [
+                    {"name": r["name"], "slug": r["slug"], "category": r["category"], "most_rooms_seen": r["capacity"],
+                     "rooms_left": [c.get("rooms_left") for c in r["cells"]],
+                     "cheapest_rate": [c.get("rate") for c in r["cells"]]}
+                    for r in m["rows"]
+                ],
+            }
+
+    @app.get("/api/rooms/{slug}")
+    def api_room(slug: str, date: str | None = None):
+        curve_date = _parse_date(date) if date else None
+        with open_db() as conn:
+            detail = data.room_detail(conn, stats_for(conn), slug, today_fn(), curve_date) if data.has_data(conn) else None
+            if detail is None:
+                return JSONResponse({"has_data": data.has_data(conn), "slug": slug}, status_code=404)
+            return {"has_data": True, **detail}
 
     @app.get("/api/suites")
     def api_suites():
         with open_db() as conn:
             if not data.has_data(conn):
                 return {"has_data": False, "suites": []}
-            return {"has_data": True, "suites": data.suites_list(conn)}
+            rooms = data.rooms_overview(conn, stats_for(conn))
+            return {"has_data": True, "suites": [
+                {**v, "name": r["name"], "room_slug": r["slug"], "category": r["category"]}
+                for r in rooms for v in r["variants"]
+            ]}
 
     @app.get("/api/suites/{code}")
     def api_suite(code: str, date: str | None = None):
         curve_date = _parse_date(date) if date else None
         with open_db() as conn:
-            detail = data.suite_detail(conn, code.upper(), today_fn(), curve_date) if data.has_data(conn) else None
+            detail = (data.suite_detail(conn, stats_for(conn), code.upper(), today_fn(), curve_date)
+                      if data.has_data(conn) else None)
             if detail is None:
                 return JSONResponse({"has_data": data.has_data(conn), "suite_code": code.upper()}, status_code=404)
             return {"has_data": True, **detail}
@@ -208,8 +326,19 @@ def create_app(
                 "version": __version__,
                 "db_exists": conn is not None,
                 "has_data": data.has_data(conn),
+                "synthetic_demo": data.is_demo(conn),
                 "last_completed_run": data.last_completed_run(conn),
                 "scheduler_running": bool(app.state.scheduler and app.state.scheduler.running),
             }
 
+    # ------------------------------------------------------------------ static assets
+
+    @app.get("/static/plotly.min.js")
+    def plotly_js():
+        if plotly_path is None:
+            raise HTTPException(status_code=404, detail="plotly package not installed")
+        return FileResponse(plotly_path, media_type="text/javascript",
+                            headers={"Cache-Control": "public, max-age=604800"})
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app

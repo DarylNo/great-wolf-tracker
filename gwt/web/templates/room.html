@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata, curve_figure, upcoming_table %}
+{% block title %}{{ detail.name if detail else slug }} · Great Wolf Tracker{% endblock %}
+{% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block content %}
+{% if not has_data %}
+  <h1>{{ slug }}</h1>
+  {{ nodata() }}
+{% elif detail is none %}
+  <h1>{{ slug }}</h1>
+  <div class="empty"><strong>Unknown room</strong>No room called “{{ slug }}” has been seen. <a href="/suites">All room types</a></div>
+{% else %}
+{% set d = detail %}
+<h1>{{ d.name }}</h1>
+<p class="sub">
+  {{ d.category or 'uncategorised' }} · {{ d.codes | length }} code{{ 's' if d.codes | length != 1 }}:
+  {% for v in d.variants %}<a href="/suites/{{ v.code }}">{{ v.code }}</a>{{ ' (accessible)' if v.accessible }}{{ ', ' if not loop.last }}{% endfor %}
+  · max occupancy {{ d.occupancy }} · most seen available {{ d.capacity_seen }} · lowest rate seen {{ d.lowest_rate_seen | money }}
+  · first seen {{ d.first_seen[:10] }}, last seen {{ d.last_seen[:10] }}
+</p>
+
+<h2>Upcoming nights</h2>
+<p class="lede">Rooms left (all variants together) and the cheapest rate among variants with rooms, for each upcoming night. Click a point to open that night.</p>
+{% if d.upcoming %}
+<div class="grid2">
+  <figure class="fig"><figcaption><strong>Rooms left</strong></figcaption><div id="up-rooms" class="chart small" role="img" aria-label="Rooms left by arrival date"></div></figure>
+  <figure class="fig"><figcaption><strong>Cheapest rate</strong></figcaption><div id="up-rate" class="chart small" role="img" aria-label="Cheapest rate by arrival date"></div></figure>
+</div>
+{{ upcoming_table(d.upcoming) }}
+{% else %}
+<div class="empty">No upcoming nights captured for this room.</div>
+{% endif %}
+
+<h2>Booking curve</h2>
+{% if d.curve_dates %}
+<form method="get" class="toolbar">
+  <label class="label" for="curve-date">Arrival</label>
+  <select id="curve-date" name="date" onchange="this.form.submit()">
+    {% for x in d.curve_dates %}<option value="{{ x }}" {{ 'selected' if x == d.curve_date }}>{{ x | datelong }}</option>{% endfor %}
+  </select>
+  <noscript><button type="submit">Show</button></noscript>
+  <a href="/date/{{ d.curve_date }}">All rooms that night</a>
+</form>
+<div class="grid2">
+  {{ curve_figure("curve-rooms", "Rooms left", "this night vs other nights for this room", d.curve.rooms, d.curve.rooms_band) }}
+  {{ curve_figure("curve-rate", "Cheapest rate", "this night vs other nights for this room", d.curve.rate, d.curve.rate_band, money=true) }}
+</div>
+{% else %}
+<div class="empty">No upcoming nights to plot.</div>
+{% endif %}
+<script type="application/json" id="room-data">{{ {"upcoming": d.upcoming, "curve": d.curve} | tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if detail %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var r = GWT.data("room-data");
+    var rooms = function (v) { return v == null ? "–" : Math.round(v) + " rooms"; };
+    GWT.redraw = function () {
+      if (r.upcoming.length) {
+        GWT.upcoming("up-rooms", r.upcoming, "rooms_left", "Rooms left", rooms);
+        GWT.upcoming("up-rate", r.upcoming, "cheapest_rate", "Cheapest rate", GWT.fmt.money, "$");
+      }
+      if (document.getElementById("curve-rooms")) {
+        GWT.curve("curve-rooms", { points: r.curve.rooms, band: r.curve.rooms_band, yTitle: "Rooms left", zero: true, name: "This night", fmt: rooms });
+        GWT.curve("curve-rate", { points: r.curve.rate, band: r.curve.rate_band, yTitle: "Cheapest rate", prefix: "$", name: "This night", fmt: GWT.fmt.money });
+      }
+    };
+    GWT.redraw();
+  });
+</script>
+{% endif %}
+{% endblock %}

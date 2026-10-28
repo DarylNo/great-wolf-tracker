@@ -85,6 +85,15 @@ def test_settings_from_env():
     assert Settings.from_env({}).port == 8080
 
 
+def test_final_fill_max_lead_setting():
+    assert Settings.from_env({}).final_fill_max_lead == 2
+    assert Settings.from_env({"GWT_FINAL_FILL_MAX_LEAD": "0"}).final_fill_max_lead == 0
+    assert Settings.from_env({"GWT_FINAL_FILL_MAX_LEAD": "5"}).final_fill_max_lead == 5
+    for bad in ("-1", "two"):
+        with pytest.raises(ConfigError):
+            Settings.from_env({"GWT_FINAL_FILL_MAX_LEAD": bad})
+
+
 def test_build_scheduler(tmp_path):
     assert build_scheduler(ScheduleConfig.from_env({"GWT_SCHEDULE_ENABLED": "false"}), tmp_path / "x.db") is None
     sched = build_scheduler(ScheduleConfig.from_env({}), tmp_path / "x.db")

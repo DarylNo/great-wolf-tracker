@@ -4,96 +4,32 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Great Wolf Tracker{% endblock %}</title>
-  <style>
-    :root {
-      --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e2e1dc;
-      --accent: #2f6f9f; --bad: #b3261e; --bad-bg: #fbe9e7; --good: #2e7d32; --grid: #e8e7e2;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #a09f99; --border: #34332f;
-        --accent: #7fb3dc; --bad: #ff8a80; --bad-bg: #3b1d1a; --good: #81c784; --grid: #2c2b28;
-      }
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text);
-           font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-    header { background: var(--panel); border-bottom: 1px solid var(--border); }
-    header .inner, main { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
-    header .inner { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 20px; min-height: 52px; }
-    header .brand { font-weight: 650; margin-right: 8px; color: var(--text); text-decoration: none; }
-    nav a { color: var(--muted); text-decoration: none; padding: 14px 2px; display: inline-block; margin-right: 14px; }
-    nav a.on, nav a:hover { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
-    main { padding-top: 20px; padding-bottom: 48px; }
-    h1 { font-size: 1.45rem; margin: 0 0 4px; }
-    h2 { font-size: 1.1rem; margin: 28px 0 8px; }
-    .sub { color: var(--muted); margin: 0 0 16px; }
-    a { color: var(--accent); }
-    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
-    .chart { width: 100%; min-height: 320px; }
-    .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-    .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; min-width: 140px; }
-    .stat .v { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; }
-    .stat .k { color: var(--muted); font-size: .85rem; }
-    .tablewrap { overflow-x: auto; }
-    table { border-collapse: collapse; width: 100%; background: var(--panel); font-variant-numeric: tabular-nums; }
-    th, td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-    th { font-weight: 600; color: var(--muted); font-size: .85rem; }
-    td.num, th.num { text-align: right; }
-    tr.soldout td { color: var(--muted); }
-    .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: .78rem; font-weight: 600; }
-    .badge.bad { background: var(--bad-bg); color: var(--bad); }
-    .badge.ok { color: var(--good); border: 1px solid currentColor; }
-    .badge.muted { color: var(--muted); border: 1px solid var(--border); }
-    .empty { background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; padding: 28px; color: var(--muted); }
-    .empty strong { color: var(--text); display: block; margin-bottom: 4px; }
-    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-    code { font-size: .9em; }
-    footer { color: var(--muted); font-size: .8rem; margin-top: 40px; }
-  </style>
-  <script src="{{ plotly_js }}" charset="utf-8"></script>
-  <script>
-    // Shared Plotly helper: colours follow the page theme.
-    function gwtPlot(id, traces, layout, onClick) {
-      const el = document.getElementById(id);
-      if (!el || !window.Plotly) return;
-      const css = getComputedStyle(document.documentElement);
-      const text = css.getPropertyValue('--text').trim();
-      const grid = css.getPropertyValue('--grid').trim();
-      const base = {
-        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-        font: { color: text, family: 'system-ui, sans-serif', size: 12 },
-        margin: { l: 56, r: 24, t: 12, b: 44 },
-        xaxis: { gridcolor: grid, zerolinecolor: grid },
-        yaxis: { gridcolor: grid, zerolinecolor: grid },
-        legend: { orientation: 'h', y: -0.2 },
-        hoverlabel: { font: { family: 'system-ui, sans-serif' } },
-      };
-      const merged = Object.assign({}, base, layout || {});
-      for (const ax of ['xaxis', 'yaxis', 'yaxis2']) {
-        if (layout && layout[ax]) merged[ax] = Object.assign({}, base[ax] || {}, layout[ax]);
-      }
-      Plotly.newPlot(el, traces, merged, { responsive: true, displaylogo: false });
-      if (onClick) el.on('plotly_click', onClick);
-    }
-    const DEMAND_SCALE = [[0, '#f2f0d8'], [0.35, '#f6c66b'], [0.65, '#e5733b'], [1, '#9e1f2b']];
-  </script>
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+  {% block head %}{% endblock %}
+  <script src="/static/app.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
-  <header>
-    <div class="inner">
+  {% if demo %}
+  <div class="banner" role="note"><div class="wrap">Synthetic demo data (made by <code>gwt demo-db</code>): not real Great Wolf numbers.</div></div>
+  {% endif %}
+  <header class="top">
+    <div class="wrap">
       <a class="brand" href="/">Great Wolf Tracker</a>
-      <nav>
-        <a href="/" class="{{ 'on' if active == 'overview.html' or active == 'date.html' }}">Overview</a>
-        <a href="/suites" class="{{ 'on' if active in ('suites.html', 'suite.html') }}">Room types</a>
-        <a href="/trends" class="{{ 'on' if active == 'trends.html' }}">Trends</a>
+      <nav aria-label="Main">
+        <a href="/" class="{{ 'on' if active in ('plan.html', 'date.html') }}">Plan</a>
+        <a href="/seasonality" class="{{ 'on' if active == 'seasonality.html' }}">Seasonality</a>
+        <a href="/suites" class="{{ 'on' if active in ('suites.html', 'suite.html', 'room.html') }}">Room types</a>
         <a href="/runs" class="{{ 'on' if active == 'runs.html' }}">Runs</a>
       </nav>
     </div>
   </header>
-  <main>
+  <main class="wrap">
     {% block content %}{% endblock %}
-    <footer>Great Wolf Lodge Niagara demand tracker v{{ version }} · JSON at <a href="/api/overview">/api</a> · LAN only, no auth</footer>
+    <footer class="foot">
+      Great Wolf Lodge Niagara demand tracker v{{ version }}. {{ price_footnote }}
+      JSON under <a href="/api/plan">/api</a>. LAN only, no login.
+    </footer>
   </main>
+  {% block scripts %}{% endblock %}
 </body>
 </html>
