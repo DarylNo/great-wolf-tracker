@@ -1,0 +1,36 @@
+name: CI
+
+# Offline only: the tests use fixtures and mock HTTP transports, and the smoke test runs the
+# image with the scheduler off. Nothing here calls Great Wolf.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest + pyflakes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked versions)
+        run: pip install -c requirements.lock -e ".[dev]"
+      - name: pyflakes
+        run: python -m pyflakes gwt tests scripts
+      - name: pytest
+        run: python -m pytest -q
+
+  docker:
+    name: docker build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t great-wolf-tracker:ci .
+      - name: Smoke test on a database from the pre-redesign build (84181f2)
+        run: python3 scripts/smoke_test.py great-wolf-tracker:ci
