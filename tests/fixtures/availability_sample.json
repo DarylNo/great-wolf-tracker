@@ -2,7 +2,7 @@
   "suites": [
     {
       "suiteCode": "SFSSB",
-      "suiteBrand": "Family Suite",
+      "suiteBrand": "Superior Family Suite",
       "suiteCategory": "standard",
       "availableRoomCount": 12,
       "baseOccupancy": 4,
@@ -106,6 +106,38 @@
               "totalNightlyRate": 459.99,
               "taxes": 59.8,
               "taxesAndFees": {"TAX": 59.8},
+              "advancedDeposit": 100.0,
+              "roomAdjustmentTax": 0
+            }
+          ]
+        },
+        {
+          "title": "Flexible",
+          "subtitle": "Free cancellation",
+          "policyType": "FLEX",
+          "ratesDisplayRank": 2,
+          "rates": [
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-TWLFD-FLEX-1.sig",
+              "rateCode": "FLEXPKG",
+              "type": "package",
+              "rate": 549.99,
+              "totalRate": 549.99,
+              "totalNightlyRate": 549.99,
+              "taxes": 71.5,
+              "taxesAndFees": {"TAX": 71.5},
+              "advancedDeposit": 100.0,
+              "roomAdjustmentTax": 0
+            },
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-TWLFD-FLEX-2.sig",
+              "rateCode": "FLEX",
+              "type": "room",
+              "rate": 499.99,
+              "totalRate": 499.99,
+              "totalNightlyRate": 499.99,
+              "taxes": 65.0,
+              "taxesAndFees": {"TAX": 65.0},
               "advancedDeposit": 100.0,
               "roomAdjustmentTax": 0
             }

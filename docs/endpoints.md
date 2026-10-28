@@ -44,6 +44,8 @@ Each `suites[]` entry:
 | `baseOccupancy`, `maxOccupancy`, `sortOrder` | |
 | `rateFamilies[]` | See below |
 
+No accessibility or bed-count field was observed on suites. If a raw response shows one, add its key to `ACCESSIBLE_KEYS` / `NUM_BEDS_KEYS` in `gwt/collector.py`.
+
 Each `rateFamilies[]` entry: `title` (e.g. "Saver"), `subtitle`, `policyType`, `ratesDisplayRank`, `rates[]`.
 
 Each `rates[]` entry:

@@ -89,12 +89,62 @@ def suite_min_nightly_rate(suite: dict[str, Any]) -> float | None:
     best: float | None = None
     for family in suite.get("rateFamilies") or []:
         for rate in family.get("rates") or []:
-            value = _to_float(rate.get("totalNightlyRate"))
-            if value is None:
-                value = _to_float(rate.get("rate"))
+            value = _rate_value(rate)
             if value is not None and (best is None or value < best):
                 best = value
     return best
+
+
+# Accessibility and bed count were NOT among the suite fields captured during endpoint
+# discovery (docs/endpoints.md). Until a raw response confirms the real key names, we
+# look for these likely candidates and store NULL when none is present.
+ACCESSIBLE_KEYS = ("isAccessible", "accessible", "isAda", "isADA", "adaAccessible")
+NUM_BEDS_KEYS = ("numberOfBeds", "numBeds", "bedCount", "beds")
+
+
+def _first_present(suite: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in suite and suite[key] is not None:
+            return suite[key]
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_bool_int(value: Any) -> int | None:
+    """1/0 for truthy/falsy flags (incl. "true"/"false" strings), None if unknown."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "y", "1"):
+            return 1
+        if v in ("false", "no", "n", "0"):
+            return 0
+        return None
+    return 1 if value else 0
+
+
+def _num_beds(value: Any) -> int | None:
+    # Some APIs return a list of bed descriptors rather than a count.
+    if isinstance(value, list):
+        return len(value)
+    return _to_int(value)
+
+
+@dataclass
+class RateFamilyRow:
+    title: str
+    policy_type: str | None
+    display_rank: int | None
+    min_total_nightly_rate: float | None
 
 
 @dataclass
@@ -103,6 +153,34 @@ class SuiteRow:
     suite_category: str | None
     available_room_count: int
     min_total_nightly_rate: float | None
+    suite_brand: str | None = None
+    base_occupancy: int | None = None
+    max_occupancy: int | None = None
+    is_accessible: int | None = None
+    num_beds: int | None = None
+    sort_order: int | None = None
+    rate_families: list[RateFamilyRow] = field(default_factory=list)
+
+
+def _rate_value(rate: dict[str, Any]) -> float | None:
+    value = _to_float(rate.get("totalNightlyRate"))
+    return value if value is not None else _to_float(rate.get("rate"))
+
+
+def parse_rate_families(suite: dict[str, Any]) -> list[RateFamilyRow]:
+    """Cheapest nightly rate per rate family (e.g. Saver vs Flexible)."""
+    rows = []
+    for family in suite.get("rateFamilies") or []:
+        values = [v for v in (_rate_value(r) for r in family.get("rates") or []) if v is not None]
+        rows.append(
+            RateFamilyRow(
+                title=str(family.get("title") or ""),
+                policy_type=family.get("policyType"),
+                display_rank=_to_int(family.get("ratesDisplayRank")),
+                min_total_nightly_rate=min(values) if values else None,
+            )
+        )
+    return rows
 
 
 @dataclass
@@ -142,6 +220,13 @@ def parse_availability(payload: dict[str, Any], arrival: date | str) -> Snapshot
                 suite_category=suite.get("suiteCategory"),
                 available_room_count=max(count_int, 0),
                 min_total_nightly_rate=suite_min_nightly_rate(suite),
+                suite_brand=suite.get("suiteBrand"),
+                base_occupancy=_to_int(suite.get("baseOccupancy")),
+                max_occupancy=_to_int(suite.get("maxOccupancy")),
+                is_accessible=_to_bool_int(_first_present(suite, ACCESSIBLE_KEYS)),
+                num_beds=_num_beds(_first_present(suite, NUM_BEDS_KEYS)),
+                sort_order=_to_int(suite.get("sortOrder")),
+                rate_families=parse_rate_families(suite),
             )
         )
 

@@ -1,4 +1,8 @@
-"""SQLite storage. Append-only: every run adds rows, nothing is overwritten."""
+"""SQLite storage. Snapshot tables are append-only: every run adds rows, nothing is overwritten.
+
+The `suites` lookup table is the one exception: it is upserted on every save so it always
+reflects the latest known description of each suite type plus when it was first/last seen.
+"""
 
 from __future__ import annotations
 
@@ -33,12 +37,61 @@ CREATE TABLE IF NOT EXISTS suite_snapshots (
     suite_code              TEXT    NOT NULL,
     suite_category          TEXT,
     available_room_count    INTEGER,
+    min_total_nightly_rate  REAL,
+    suite_brand             TEXT,
+    base_occupancy          INTEGER,
+    max_occupancy           INTEGER,
+    is_accessible           INTEGER,            -- 1/0/NULL if the API doesn't say
+    num_beds                INTEGER,            -- NULL if the API doesn't say
+    sort_order              INTEGER
+);
+
+-- Cheapest rate per rate family (Saver, Flexible, ...) for each suite snapshot.
+CREATE TABLE IF NOT EXISTS suite_rate_families (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    suite_snapshot_id       INTEGER NOT NULL REFERENCES suite_snapshots (id),
+    family_title            TEXT    NOT NULL,
+    policy_type             TEXT,
+    display_rank            INTEGER,
     min_total_nightly_rate  REAL
+);
+
+-- Latest description of every suite type ever seen.
+CREATE TABLE IF NOT EXISTS suites (
+    suite_code              TEXT PRIMARY KEY,
+    suite_brand             TEXT,
+    suite_category          TEXT,
+    max_occupancy           INTEGER,
+    is_accessible           INTEGER,
+    first_seen              TEXT    NOT NULL,   -- scraped_at of first sighting
+    last_seen               TEXT    NOT NULL    -- scraped_at of latest sighting
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_arrival ON snapshots (arrival_date, scraped_at);
 CREATE INDEX IF NOT EXISTS idx_suite_snapshots_arrival ON suite_snapshots (arrival_date, suite_code, scraped_at);
+CREATE INDEX IF NOT EXISTS idx_suite_rate_families_parent ON suite_rate_families (suite_snapshot_id);
 """
+
+# Columns added after the first schema version; applied to older databases on connect.
+_ADDED_COLUMNS = {
+    "suite_snapshots": {
+        "suite_brand": "TEXT",
+        "base_occupancy": "INTEGER",
+        "max_occupancy": "INTEGER",
+        "is_accessible": "INTEGER",
+        "num_beds": "INTEGER",
+        "sort_order": "INTEGER",
+    },
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, cols in _ADDED_COLUMNS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+    conn.commit()
 
 
 def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -47,6 +100,7 @@ def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -56,7 +110,7 @@ def captured_dates(conn: sqlite3.Connection, run_id: str) -> set[str]:
 
 
 def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: Snapshot) -> None:
-    """Insert one snapshot and its suite rows atomically."""
+    """Insert one snapshot, its suite rows and rate-family rows, and upsert `suites`, atomically."""
     with conn:
         conn.execute(
             """INSERT INTO snapshots (run_id, scraped_at, arrival_date, total_rooms_available,
@@ -75,11 +129,12 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
                 snap.raw_json,
             ),
         )
-        conn.executemany(
-            """INSERT INTO suite_snapshots (run_id, scraped_at, arrival_date, suite_code,
-                   suite_category, available_room_count, min_total_nightly_rate)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [
+        for s in snap.suites:
+            cur = conn.execute(
+                """INSERT INTO suite_snapshots (run_id, scraped_at, arrival_date, suite_code,
+                       suite_category, available_room_count, min_total_nightly_rate, suite_brand,
+                       base_occupancy, max_occupancy, is_accessible, num_beds, sort_order)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id,
                     scraped_at,
@@ -88,7 +143,95 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
                     s.suite_category,
                     s.available_room_count,
                     s.min_total_nightly_rate,
+                    s.suite_brand,
+                    s.base_occupancy,
+                    s.max_occupancy,
+                    s.is_accessible,
+                    s.num_beds,
+                    s.sort_order,
+                ),
+            )
+            conn.executemany(
+                """INSERT INTO suite_rate_families (suite_snapshot_id, family_title, policy_type,
+                       display_rank, min_total_nightly_rate)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [
+                    (cur.lastrowid, f.title, f.policy_type, f.display_rank, f.min_total_nightly_rate)
+                    for f in s.rate_families
+                ],
+            )
+            if s.suite_code:
+                conn.execute(
+                    """INSERT INTO suites (suite_code, suite_brand, suite_category, max_occupancy,
+                           is_accessible, first_seen, last_seen)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT (suite_code) DO UPDATE SET
+                           suite_brand    = COALESCE(excluded.suite_brand, suites.suite_brand),
+                           suite_category = COALESCE(excluded.suite_category, suites.suite_category),
+                           max_occupancy  = COALESCE(excluded.max_occupancy, suites.max_occupancy),
+                           is_accessible  = COALESCE(excluded.is_accessible, suites.is_accessible),
+                           first_seen     = MIN(suites.first_seen, excluded.first_seen),
+                           last_seen      = MAX(suites.last_seen, excluded.last_seen)""",
+                    (
+                        s.suite_code,
+                        s.suite_brand,
+                        s.suite_category,
+                        s.max_occupancy,
+                        s.is_accessible,
+                        scraped_at,
+                        scraped_at,
+                    ),
                 )
-                for s in snap.suites
-            ],
-        )
+
+
+# --------------------------------------------------------------------------- queries
+
+
+def latest_suites_for_date(conn: sqlite3.Connection, arrival_date: str) -> tuple[str | None, list[dict]]:
+    """Suite rows from the most recent snapshot of `arrival_date`. Returns (scraped_at, rows)."""
+    latest = conn.execute(
+        "SELECT run_id, scraped_at FROM snapshots WHERE arrival_date = ? ORDER BY scraped_at DESC, id DESC LIMIT 1",
+        (arrival_date,),
+    ).fetchone()
+    if latest is None:
+        return None, []
+    run_id, scraped_at = latest
+    cur = conn.execute(
+        """SELECT suite_code, COALESCE(suite_brand, suite_code) AS suite_name, suite_category,
+                  available_room_count, min_total_nightly_rate
+           FROM suite_snapshots
+           WHERE run_id = ? AND arrival_date = ?
+           ORDER BY sort_order IS NULL, sort_order, suite_code""",
+        (run_id, arrival_date),
+    )
+    cols = [c[0] for c in cur.description]
+    return scraped_at, [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def suite_history(conn: sqlite3.Connection, arrival_date: str, suite_code: str) -> list[dict]:
+    """Booking curve: one row per scrape run for this suite and arrival date, oldest first."""
+    cur = conn.execute(
+        """SELECT ss.run_id, ss.scraped_at,
+                  CAST(julianday(ss.arrival_date) - julianday(substr(ss.scraped_at, 1, 10)) AS INTEGER)
+                      AS days_out,
+                  ss.available_room_count, ss.min_total_nightly_rate
+           FROM suite_snapshots ss
+           WHERE ss.arrival_date = ? AND ss.suite_code = ?
+           ORDER BY ss.scraped_at, ss.id""",
+        (arrival_date, suite_code),
+    )
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def rate_families_for(conn: sqlite3.Connection, arrival_date: str, suite_code: str, run_id: str) -> list[dict]:
+    cur = conn.execute(
+        """SELECT rf.family_title, rf.policy_type, rf.min_total_nightly_rate
+           FROM suite_rate_families rf
+           JOIN suite_snapshots ss ON ss.id = rf.suite_snapshot_id
+           WHERE ss.arrival_date = ? AND ss.suite_code = ? AND ss.run_id = ?
+           ORDER BY rf.display_rank IS NULL, rf.display_rank, rf.family_title""",
+        (arrival_date, suite_code, run_id),
+    )
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]

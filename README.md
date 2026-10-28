@@ -70,11 +70,41 @@ suite_snapshots(                    -- one row per suite type per arrival date p
   scraped_at             TEXT,
   arrival_date           TEXT,
   suite_code             TEXT,      -- e.g. SFSSB
+  suite_brand            TEXT,      -- human name, e.g. "Superior Family Suite"
   suite_category         TEXT,      -- standard / themed / premium / cottage
+  base_occupancy         INTEGER,
+  max_occupancy          INTEGER,
+  is_accessible          INTEGER,   -- 1/0, NULL until the API field is confirmed (see below)
+  num_beds               INTEGER,   -- NULL until the API field is confirmed (see below)
+  sort_order             INTEGER,   -- the site's display order
   available_room_count   INTEGER,   -- 0 = sold out
+  min_total_nightly_rate REAL       -- cheapest rate across all families
+)
+
+suite_rate_families(                -- cheapest rate per rate family, per suite snapshot
+  suite_snapshot_id      INTEGER,   -- -> suite_snapshots.id
+  family_title           TEXT,      -- "Saver", "Flexible", ...
+  policy_type            TEXT,
+  display_rank           INTEGER,
   min_total_nightly_rate REAL
 )
+
+suites(                             -- lookup: one row per suite type ever seen, upserted every save
+  suite_code             TEXT PRIMARY KEY,
+  suite_brand            TEXT,
+  suite_category         TEXT,
+  max_occupancy          INTEGER,
+  is_accessible          INTEGER,
+  first_seen             TEXT,      -- scraped_at of first sighting
+  last_seen              TEXT       -- scraped_at of latest sighting
+)
 ```
+
+A suite whose `last_seen` is older than the latest run has dropped out of the API, and a recent `first_seen` means a new suite type. Rate families live in a child table rather than a JSON column so they can be queried directly (e.g. the Saver vs Flexible spread over time).
+
+**Accessibility and bed count:** the captured availability response (see [`docs/endpoints.md`](docs/endpoints.md)) has no explicit accessibility or bed-count field on suites. The parser checks a few likely key names (`isAccessible`, `isAda`, `numberOfBeds`, `bedCount`, ...) and stores NULL when none is present. Once a real raw response confirms the right keys, update `ACCESSIBLE_KEYS` / `NUM_BEDS_KEYS` in `gwt/collector.py`. `raw_json` keeps the full response, so older snapshots can be re-parsed.
+
+Older databases get the new `suite_snapshots` columns added automatically on connect.
 
 ## Running locally
 
@@ -84,7 +114,13 @@ pip install -e '.[dev]'
 pytest                                  # offline tests against tests/fixtures/
 python -m gwt sweep --days 7 -v         # small live run
 python -m gwt sweep --days 365          # full sweep (~25-30 min at 3-5 s/request)
+
+# Query what's stored
+python -m gwt suites --date 2026-11-21               # latest snapshot: every room type for that night
+python -m gwt suites --date 2026-11-21 --code SFSSB  # booking curve for one suite across runs
 ```
+
+`suites --date` prints suite name, code, category, rooms left, cheapest rate and a SOLD OUT flag, using the most recent scrape of that date. Adding `--code` prints one row per scrape run with days before arrival, rooms left, cheapest rate, the cheapest rate in each rate family (Saver, Flexible, ...) and a sold-out flag. Both take `--db PATH`.
 
 Options: `--start YYYY-MM-DD` (first arrival date, default today UTC), `--db PATH` (default `data/gwl.db`), `--run-id ID` (re-use one to resume an interrupted sweep; default is today's UTC date, so re-running the same day resumes automatically). Set `GWT_USER_AGENT` to override the User-Agent.
 
