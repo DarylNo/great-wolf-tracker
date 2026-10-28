@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}Runs · Great Wolf Tracker{% endblock %}
+{% block content %}
+<h1>Runs</h1>
+<p class="sub">Each sweep invocation. Re-running a run ID (same UTC day) resumes it and gets its own row.</p>
+
+<div class="panel">
+  <strong>Schedule</strong>
+  {% if jobs %}
+    ({{ schedule.timezone }})
+    <ul>{% for j in jobs %}<li>{{ j.name }}: next run {{ j.next_run or "-" }}</li>{% endfor %}</ul>
+  {% elif not schedule.enabled %}
+    <p class="sub">Disabled (<code>GWT_SCHEDULE_ENABLED=false</code>). Sweeps only run from the CLI.</p>
+  {% else %}
+    <p class="sub">Not running in this process.</p>
+  {% endif %}
+</div>
+
+{% if not has_data %}
+  {{ nodata("No sweeps have been logged.") }}
+{% else %}
+  <div class="tablewrap"><table>
+    <tr><th>Run ID</th><th>Trigger</th><th>Started (UTC)</th><th>Finished (UTC)</th><th class="num">Days</th>
+        <th class="num">Fetched</th><th class="num">Skipped</th><th class="num">Failed dates</th><th class="num">Failed requests</th><th>Status</th></tr>
+    {% for r in runs %}
+    <tr>
+      <td>{{ r.run_id }}</td><td>{{ r.trigger or "-" }}</td><td>{{ r.started_at }}</td><td>{{ r.finished_at or "-" }}</td>
+      <td class="num">{{ r.days }}</td><td class="num">{{ r.fetched }}</td><td class="num">{{ r.skipped }}</td>
+      <td class="num">{{ r.failed_dates }}</td><td class="num">{{ r.failures }}</td>
+      <td>
+        {% if r.blocked %}<span class="badge bad">BLOCKED (403)</span>
+        {% elif r.status == 'completed' %}<span class="badge ok">completed</span>
+        {% elif r.status == 'running' %}<span class="badge muted">running</span>
+        {% else %}<span class="badge bad">{{ r.status }}</span>{% endif %}
+        {% if r.message %}<div class="sub" style="white-space:normal;max-width:360px">{{ r.message }}</div>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+{% endif %}
+{% endblock %}

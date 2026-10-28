@@ -158,5 +158,50 @@ def test_other_4xx_skips_date(conn, sample_payload):
     assert result.failed_dates == 1 and result.fetched == 1
 
 
+def test_runs_table_logs_completed_run(conn, sample_payload):
+    stamps = iter(f"2026-10-28T03:17:{i:02d}+00:00" for i in range(60))
+    run_sweep(
+        conn,
+        client_for(lambda r: httpx.Response(200, json=sample_payload)),
+        days=3,
+        start=START,
+        run_id="r1",
+        trigger="schedule:weekly",
+        sleep=Recorder(),
+        clock=lambda: next(stamps),
+    )
+    row = conn.execute(
+        "SELECT run_id, trigger, started_at, finished_at, days, fetched, skipped, failed_dates, status, blocked FROM runs"
+    ).fetchone()
+    assert row[:2] == ("r1", "schedule:weekly")
+    assert row[2] == "2026-10-28T03:17:00+00:00" and row[3] is not None
+    assert row[4:] == (3, 3, 0, 0, "completed", 0)
+
+
+def test_runs_table_logs_abort_and_block(conn):
+    with pytest.raises(SweepAborted):
+        run_sweep(conn, client_for(lambda r: httpx.Response(500)), days=3, start=START, run_id="a", sleep=Recorder())
+    with pytest.raises(SweepAborted):
+        run_sweep(conn, client_for(lambda r: httpx.Response(403)), days=3, start=START, run_id="b", sleep=Recorder())
+    rows = conn.execute("SELECT run_id, status, blocked, failures, message FROM runs ORDER BY id").fetchall()
+    assert rows[0][:4] == ("a", "aborted", 0, MAX_CONSECUTIVE_FAILURES)
+    assert rows[1][:4] == ("b", "aborted", 1, 1)
+    assert "403" in rows[1][4]
+
+
+def test_resumed_run_gets_new_runs_row_and_counts_skips(conn, sample_payload):
+    ok = client_for(lambda r: httpx.Response(200, json=sample_payload))
+    run_sweep(conn, ok, days=2, start=START, run_id="r1", sleep=Recorder())
+    run_sweep(conn, ok, days=3, start=START, run_id="r1", sleep=Recorder())
+    rows = conn.execute("SELECT fetched, skipped FROM runs ORDER BY id").fetchall()
+    assert rows == [(2, 0), (1, 2)]
+
+
+def test_mark_interrupted(conn):
+    db.start_run(conn, run_id="x", trigger="cli", started_at="t0", start_date="2026-11-18", days=5, skipped=0)
+    assert db.mark_interrupted(conn, "t1") == 1
+    assert conn.execute("SELECT status, finished_at FROM runs").fetchone() == ("interrupted", "t1")
+
+
 def test_cli_parses_and_rejects_bad_days(tmp_path):
     assert main(["sweep", "--days", "0", "--db", str(tmp_path / "x.db")]) == 2

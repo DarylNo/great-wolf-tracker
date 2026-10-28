@@ -1,0 +1,8 @@
+{% macro nodata(what="") %}
+<div class="empty">
+  <strong>No data yet</strong>
+  {{ what }}
+  Data appears after the first sweep. It runs on schedule (see <a href="/runs">Runs</a>), or start one by hand with
+  <code>docker compose exec gwt python -m gwt sweep --days 30</code>.
+</div>
+{% endmacro %}

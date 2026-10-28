@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}Room types · Great Wolf Tracker{% endblock %}
+{% block content %}
+<h1>Room types</h1>
+<p class="sub">Every suite type the API has returned, with when it was first and last seen. A suite missing from the latest run may have been retired; a new one shows up as new.</p>
+
+{% if not has_data %}
+  {{ nodata() }}
+{% else %}
+  <div class="tablewrap"><table>
+    <tr><th>Suite</th><th>Code</th><th>Category</th><th class="num">Max occ.</th><th>Accessible</th><th>First seen</th><th>Last seen</th><th></th></tr>
+    {% for s in suites %}
+    <tr>
+      <td><a href="/suites/{{ s.suite_code }}">{{ s.suite_brand or s.suite_code }}</a></td>
+      <td>{{ s.suite_code }}</td>
+      <td>{{ s.suite_category or "-" }}</td>
+      <td class="num">{{ s.max_occupancy if s.max_occupancy is not none else "-" }}</td>
+      <td>{{ s.is_accessible | yesno }}</td>
+      <td>{{ s.first_seen[:10] }}</td>
+      <td>{{ s.last_seen[:10] }}</td>
+      <td>
+        {% if not s.in_latest_run %}<span class="badge muted">not in latest run</span>
+        {% elif s.new_in_latest_run %}<span class="badge ok">new</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+{% endif %}
+{% endblock %}

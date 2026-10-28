@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}{{ code }} · Great Wolf Tracker{% endblock %}
+{% block content %}
+{% if not has_data %}
+  <h1>{{ code }}</h1>
+  {{ nodata() }}
+{% elif detail is none %}
+  <h1>{{ code }}</h1>
+  <div class="empty"><strong>Unknown suite code</strong>No suite {{ code }} has been seen. <a href="/suites">All room types</a></div>
+{% else %}
+  {% set s = detail.suite %}
+  <h1>{{ s.suite_brand or s.suite_code }}</h1>
+  <p class="sub">{{ s.suite_code }} · {{ s.suite_category or "uncategorised" }} · max occupancy {{ s.max_occupancy if s.max_occupancy is not none else "?" }} · accessible {{ s.is_accessible | yesno }} · first seen {{ s.first_seen[:10] }}, last seen {{ s.last_seen[:10] }}</p>
+
+  <h2>Upcoming dates</h2>
+  <p class="sub">Rooms left and cheapest rate for this suite on each upcoming arrival date (latest scrape of each).</p>
+  {% if detail.upcoming %}
+    <div class="panel"><div id="upcoming" class="chart"></div></div>
+  {% else %}
+    <div class="empty">No upcoming dates captured for this suite.</div>
+  {% endif %}
+
+  <h2>Booking curve</h2>
+  {% if detail.curve_dates %}
+  <form method="get" class="sub">
+    <label>Arrival date
+      <select name="date" onchange="this.form.submit()">
+        {% for d in detail.curve_dates %}<option value="{{ d }}" {{ 'selected' if d == detail.curve_date }}>{{ d }}</option>{% endfor %}
+      </select>
+    </label>
+    · <a href="/date/{{ detail.curve_date }}">all room types for {{ detail.curve_date }}</a>
+  </form>
+  {% endif %}
+  {% if detail.curve %}
+    <div class="panel"><div id="curve" class="chart"></div></div>
+  {% else %}
+    <div class="empty">No snapshots of this suite for {{ detail.curve_date or "that date" }}.</div>
+  {% endif %}
+
+  <script>
+    const up = {{ detail.upcoming | tojson }};
+    if (up.length) gwtPlot('upcoming', [
+      { type: 'bar', name: 'Rooms left', x: up.map(r => r.arrival_date), y: up.map(r => r.available_room_count),
+        marker: { color: '#2f6f9f' } },
+      { type: 'scatter', mode: 'lines', name: 'Cheapest rate ($)', x: up.map(r => r.arrival_date),
+        y: up.map(r => r.min_total_nightly_rate), yaxis: 'y2', line: { color: '#e5733b' }, connectgaps: false },
+    ], {
+      xaxis: { type: 'date' }, yaxis: { title: { text: 'Rooms left' }, rangemode: 'tozero' },
+      yaxis2: { title: { text: 'Rate ($)' }, overlaying: 'y', side: 'right', showgrid: false },
+      margin: { l: 56, r: 64, t: 12, b: 44 },
+    }, (ev) => { const p = ev.points[0]; if (p) location.href = '/date/' + String(p.x).slice(0, 10); });
+
+    const c = {{ detail.curve | tojson }};
+    if (c.length) gwtPlot('curve', [
+      { type: 'scatter', mode: 'lines+markers', name: 'Rooms left', x: c.map(r => r.scraped_at),
+        y: c.map(r => r.available_room_count), line: { color: '#2f6f9f' } },
+      { type: 'scatter', mode: 'lines+markers', name: 'Cheapest rate ($)', x: c.map(r => r.scraped_at),
+        y: c.map(r => r.min_total_nightly_rate), yaxis: 'y2', line: { color: '#e5733b', dash: 'dot' } },
+    ], {
+      xaxis: { type: 'date', title: { text: 'Scraped' } }, yaxis: { title: { text: 'Rooms left' }, rangemode: 'tozero' },
+      yaxis2: { title: { text: 'Rate ($)' }, overlaying: 'y', side: 'right', showgrid: false },
+      margin: { l: 56, r: 64, t: 12, b: 44 },
+    });
+  </script>
+{% endif %}
+{% endblock %}

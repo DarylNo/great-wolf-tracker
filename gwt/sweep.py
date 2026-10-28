@@ -8,12 +8,14 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 import httpx
 
 from gwt import db
-from gwt.collector import fetch_availability, parse_availability
+from gwt.collector import fetch_availability, make_client, parse_availability
+from gwt.locking import sweep_lock
 
 log = logging.getLogger("gwt.sweep")
 
@@ -27,6 +29,10 @@ BACKOFF_CAP_S = 300.0
 class SweepAborted(RuntimeError):
     """Raised when the sweep must stop (too many failures, or we look blocked)."""
 
+    def __init__(self, message: str, *, blocked: bool = False):
+        super().__init__(message)
+        self.blocked = blocked
+
 
 @dataclass
 class SweepResult:
@@ -34,6 +40,7 @@ class SweepResult:
     fetched: int = 0
     skipped: int = 0
     failed_dates: int = 0
+    failures: int = 0
 
 
 def utc_now_iso() -> str:
@@ -70,6 +77,7 @@ def run_sweep(
     days: int = 365,
     start: date | None = None,
     run_id: str | None = None,
+    trigger: str = "cli",
     sleep: Callable[[float], None] = time.sleep,
     rng: random.Random | None = None,
     clock: Callable[[], str] = utc_now_iso,
@@ -82,6 +90,8 @@ def run_sweep(
     - 403: treated as "blocked" -> abort immediately (stop and reassess, don't evade).
     - Other 4xx: logged, date skipped, counts toward the failure streak.
     - 5 consecutive failures of any kind abort the run.
+
+    Every invocation is logged to the `runs` table (status, counters, abort reason).
     """
     rng = rng or random.Random()
     start = start or datetime.now(timezone.utc).date()
@@ -93,61 +103,118 @@ def run_sweep(
     result.skipped = days - len(pending)
     log.info("run %s: %d dates to fetch, %d already captured", run_id, len(pending), result.skipped)
 
+    run_row = db.start_run(
+        conn,
+        run_id=run_id,
+        trigger=trigger,
+        started_at=clock(),
+        start_date=start.isoformat(),
+        days=days,
+        skipped=result.skipped,
+    )
+
     consecutive_failures = 0
     first_request = True
 
     def fail(reason: str) -> None:
         nonlocal consecutive_failures
         consecutive_failures += 1
+        result.failures += 1
         log.warning("failure %d/%d: %s", consecutive_failures, MAX_CONSECUTIVE_FAILURES, reason)
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
             raise SweepAborted(f"aborting after {consecutive_failures} consecutive failures (last: {reason})")
 
-    for arrival in pending:
-        while True:
-            if not first_request:
-                sleep(rng.uniform(MIN_DELAY_S, MAX_DELAY_S))
-            first_request = False
+    def progress(**extra) -> None:
+        db.update_run(
+            conn,
+            run_row,
+            fetched=result.fetched,
+            failed_dates=result.failed_dates,
+            failures=result.failures,
+            **extra,
+        )
 
-            try:
-                resp = fetch_availability(client, arrival)
-            except httpx.TransportError as exc:
-                fail(f"{arrival}: network error {exc!r}")
-                sleep(backoff_delay(consecutive_failures))
-                continue
+    try:
+        for arrival in pending:
+            while True:
+                if not first_request:
+                    sleep(rng.uniform(MIN_DELAY_S, MAX_DELAY_S))
+                first_request = False
 
-            status = resp.status_code
-            if status == 403:
-                raise SweepAborted(f"{arrival}: HTTP 403 - looks blocked; stopping (do not evade)")
-            if status == 429 or status >= 500:
-                fail(f"{arrival}: HTTP {status}")
-                wait = _retry_after_seconds(resp)
-                sleep(max(wait or 0.0, backoff_delay(consecutive_failures)))
-                continue
-            if status >= 400:
-                fail(f"{arrival}: HTTP {status}, skipping date")
-                result.failed_dates += 1
+                try:
+                    resp = fetch_availability(client, arrival)
+                except httpx.TransportError as exc:
+                    fail(f"{arrival}: network error {exc!r}")
+                    sleep(backoff_delay(consecutive_failures))
+                    continue
+
+                status = resp.status_code
+                if status == 403:
+                    result.failures += 1
+                    raise SweepAborted(
+                        f"{arrival}: HTTP 403 - looks blocked; stopping (do not evade)", blocked=True
+                    )
+                if status == 429 or status >= 500:
+                    fail(f"{arrival}: HTTP {status}")
+                    wait = _retry_after_seconds(resp)
+                    sleep(max(wait or 0.0, backoff_delay(consecutive_failures)))
+                    continue
+                if status >= 400:
+                    result.failed_dates += 1
+                    fail(f"{arrival}: HTTP {status}, skipping date")
+                    break
+
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    result.failed_dates += 1
+                    fail(f"{arrival}: response was not JSON")
+                    break
+
+                snap = parse_availability(payload, arrival)
+                db.save_snapshot(conn, run_id, clock(), snap)
+                consecutive_failures = 0
+                result.fetched += 1
+                progress()
+                log.info(
+                    "%s rooms=%d sold_out=%d/%d min=%s",
+                    arrival,
+                    snap.total_rooms_available,
+                    snap.suite_types_sold_out,
+                    snap.suite_types,
+                    snap.min_rate,
+                )
                 break
+    except SweepAborted as exc:
+        progress(status="aborted", blocked=int(exc.blocked), message=str(exc), finished_at=clock())
+        raise
+    except BaseException as exc:  # crash, Ctrl-C, container stop
+        progress(status="error", message=f"{type(exc).__name__}: {exc}", finished_at=clock())
+        raise
 
-            try:
-                payload = resp.json()
-            except ValueError:
-                fail(f"{arrival}: response was not JSON")
-                result.failed_dates += 1
-                break
-
-            snap = parse_availability(payload, arrival)
-            db.save_snapshot(conn, run_id, clock(), snap)
-            consecutive_failures = 0
-            result.fetched += 1
-            log.info(
-                "%s rooms=%d sold_out=%d/%d min=%s",
-                arrival,
-                snap.total_rooms_available,
-                snap.suite_types_sold_out,
-                snap.suite_types,
-                snap.min_rate,
-            )
-            break
-
+    progress(status="completed", finished_at=clock())
     return result
+
+
+def execute_sweep(
+    db_path: str | Path,
+    *,
+    days: int,
+    start: date | None = None,
+    run_id: str | None = None,
+    trigger: str = "cli",
+) -> SweepResult:
+    """Lock, connect, run one sweep. Shared by the CLI and the in-container scheduler.
+
+    Raises gwt.locking.SweepBusy if another sweep holds the lock, SweepAborted on abort.
+    """
+    with sweep_lock(db_path):
+        conn = db.connect(db_path)
+        try:
+            stale = db.mark_interrupted(conn, utc_now_iso())
+            if stale:
+                log.warning("marked %d stale 'running' run(s) as interrupted", stale)
+            with make_client() as client:
+                return run_sweep(conn, client, days=days, start=start, run_id=run_id, trigger=trigger)
+        finally:
+            conn.close()

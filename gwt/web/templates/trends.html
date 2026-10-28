@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}Trends · Great Wolf Tracker{% endblock %}
+{% block content %}
+<h1>Trends</h1>
+<p class="sub">Average demand by ISO week of the year, one line per year, using each arrival date's latest scrape. As the years stack up, this becomes the seasonality curve.</p>
+
+{% if not has_data %}
+  {{ nodata() }}
+{% else %}
+  <div class="panel"><div id="trend" class="chart" style="min-height:380px"></div></div>
+  <script>
+    const h = {{ hist | tojson }};
+    gwtPlot('trend', h.years.map((y, i) => ({
+      type: 'scatter', mode: 'lines+markers', name: String(y), x: h.weeks, y: h.z[i], connectgaps: false,
+      hovertemplate: y + ' week %{x}: %{y}<extra></extra>',
+    })), {
+      xaxis: { title: { text: 'ISO week' }, range: [0.5, 53.5], dtick: 4 },
+      yaxis: { title: { text: 'Avg demand' }, range: [0, 100] },
+    });
+  </script>
+{% endif %}
+{% endblock %}

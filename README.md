@@ -29,8 +29,9 @@ Optional enrichment (later):
 1. **Collector** (`gwt/collector.py`): calls the availability JSON API the booking site itself uses (`prod.api.greatwolf.com/room-booking/v2/lodges/NIAGON/availability`) for one arrival date, then parses the response into a run-level row plus one row per suite type. The raw response is kept with every `pricingKey` (signed booking token) stripped.
 2. **Storage** (`gwt/db.py`): SQLite (`data/gwl.db`). Each run appends rows; nothing is overwritten, so we can see how a date's inventory and price move as it approaches (booking-curve data).
 3. **Sweep** (`python -m gwt sweep --days 365`): single-threaded with a jittered 3–5 s delay between requests. It backs off exponentially on 429/5xx, aborts after 5 consecutive failures, and stops immediately on 403. It is resumable: re-running with the same run ID skips dates already captured.
-4. **Scheduler**: runs weekly (daily for the next 30 days) as a Docker container under cron on the home server. See [Running on the home server](#running-on-the-home-server).
-5. **Report** (not built yet): generates a static HTML heatmap (ISO week × year, colour = demand index) plus a booking-curve chart per date.
+   Every invocation is logged to a `runs` table (counts, failures, aborted / blocked).
+4. **Scheduler** (`gwt/scheduler.py`): APScheduler runs inside the container next to the web server. By default it does a full 365-day sweep on Sundays at 03:17 and a 30-day sweep daily at 05:43 (America/Toronto). A file lock means two sweeps never overlap, including one started by hand with `docker compose exec`.
+5. **Web dashboard** (`gwt/web/`): FastAPI with server-rendered Jinja templates and Plotly.js from a pinned CDN version, so there's no frontend build. It reads the database read-only and also serves a JSON API under `/api/...`. See [Web dashboard](#web-dashboard).
 
 ## Demand index
 
@@ -44,8 +45,10 @@ demand = 100 * ( 0.6 * (1 - rooms_available / max_rooms_seen)
 
 - `rooms_available`: `total_rooms_available` for the date
 - `max_rooms_seen`: the highest `total_rooms_available` ever observed for the same suite mix (same set of suite types). This is our best estimate of sellable capacity, since the API doesn't report it.
-- `rate_percentile`: percentile of `min_rate` across all dates in the same run (0–1)
+- `rate_percentile`: percentile (0–1) of `min_rate` within the set of dates being compared. On the overview that set is the next 365 days. On Trends and the ISO-week view it is every arrival date ever captured. A date with no available rate at all (fully sold out) counts as the top percentile.
 - `sold_out_type_ratio`: `suite_types_sold_out / suite_types`
+
+Each arrival date uses its latest snapshot. For past dates that is the scrape closest to arrival, the best estimate of how full the lodge actually got. The suite mix is approximated by the number of suite types returned. Implementation: `gwt/metrics.py`.
 
 Weights are a starting point; tune once we have a few months of data.
 
@@ -98,6 +101,19 @@ suites(                             -- lookup: one row per suite type ever seen,
   first_seen             TEXT,      -- scraped_at of first sighting
   last_seen              TEXT       -- scraped_at of latest sighting
 )
+
+runs(                               -- one row per sweep invocation (a resumed run_id gets a new row)
+  run_id                 TEXT,
+  trigger                TEXT,      -- cli / schedule:weekly / schedule:daily
+  started_at, finished_at TEXT,
+  start_date             TEXT,      -- first arrival date requested
+  days                   INTEGER,
+  fetched, skipped, failed_dates INTEGER,
+  failures               INTEGER,   -- failed requests, including retried ones
+  status                 TEXT,      -- running / completed / aborted / error / interrupted
+  blocked                INTEGER,   -- 1 if the run stopped on HTTP 403
+  message                TEXT       -- abort / error reason
+)
 ```
 
 A suite whose `last_seen` is older than the latest run has dropped out of the API, and a recent `first_seen` means a new suite type. Rate families live in a child table rather than a JSON column so they can be queried directly (e.g. the Saver vs Flexible spread over time).
@@ -118,42 +134,87 @@ python -m gwt sweep --days 365          # full sweep (~25-30 min at 3-5 s/reques
 # Query what's stored
 python -m gwt suites --date 2026-11-21               # latest snapshot: every room type for that night
 python -m gwt suites --date 2026-11-21 --code SFSSB  # booking curve for one suite across runs
+
+# Web dashboard on http://localhost:8080 (add --no-scheduler to skip the built-in schedule)
+python -m gwt serve --no-scheduler
 ```
 
 `suites --date` prints suite name, code, category, rooms left, cheapest rate and a SOLD OUT flag, using the most recent scrape of that date. Adding `--code` prints one row per scrape run with days before arrival, rooms left, cheapest rate, the cheapest rate in each rate family (Saver, Flexible, ...) and a sold-out flag. Both take `--db PATH`.
 
-Options: `--start YYYY-MM-DD` (first arrival date, default today UTC), `--db PATH` (default `data/gwl.db`), `--run-id ID` (re-use one to resume an interrupted sweep; default is today's UTC date, so re-running the same day resumes automatically). Set `GWT_USER_AGENT` to override the User-Agent.
+Options: `--start YYYY-MM-DD` (first arrival date, default today UTC), `--db PATH` (default `$GWT_DB` or `data/gwl.db`), `--run-id ID` (re-use one to resume an interrupted sweep; default is today's UTC date, so re-running the same day resumes automatically). Set `GWT_USER_AGENT` to override the User-Agent.
 
-Exit codes: `0` finished, `1` aborted (5 consecutive failures or a 403), `2` bad arguments.
+Exit codes: `0` finished, `1` aborted (5 consecutive failures or a 403), `2` bad arguments, `3` another sweep is already running.
 
-## Running on the home server
+## Run on the home server (docker compose)
 
-Build the image and create a data directory owned by the container user (uid 1000):
+One container serves the dashboard on port 8080 and runs the sweep schedule itself, so no host cron is needed.
 
 ```bash
 git clone https://github.com/DarylNo/great-wolf-tracker.git /opt/great-wolf-tracker
 cd /opt/great-wolf-tracker
-docker build -t great-wolf-tracker .
-sudo mkdir -p /srv/gwt/data && sudo chown 1000:1000 /srv/gwt/data
-
-# one-off test run
-docker run --rm -v /srv/gwt/data:/app/data great-wolf-tracker sweep --days 3 -v
+mkdir -p data && sudo chown 1000:1000 data     # container runs as uid 1000
+docker compose up -d --build
+docker compose logs -f                          # shows the next scheduled run times
 ```
 
-Then add the schedule with `crontab -e`:
+Open `http://<server>:8080`. The first scheduled sweep is the next 05:43 (30 days) or Sunday 03:17 (365 days). To start one now:
 
-```cron
-# Weekly full sweep: Sundays 03:17
-17 3 * * 0  flock -n /tmp/gwt.lock docker run --rm -v /srv/gwt/data:/app/data great-wolf-tracker sweep --days 365 >> /srv/gwt/sweep.log 2>&1
-
-# Daily sweep of the next 30 days: 05:43 (on Sundays it skips dates the weekly run already captured)
-43 5 * * *  flock -n /tmp/gwt.lock docker run --rm -v /srv/gwt/data:/app/data great-wolf-tracker sweep --days 30 >> /srv/gwt/sweep.log 2>&1
+```bash
+docker compose exec gwt python -m gwt sweep --days 30
 ```
 
-- `flock -n` stops two sweeps from overlapping.
-- Both jobs use the default run ID (today's UTC date), so they never fetch the same date twice in a day.
-- If a run aborts, check `/srv/gwt/sweep.log`. Re-running the same command on the same UTC day resumes where it stopped. **A 403 means stop and reassess** (see Ground rules); don't just re-schedule it.
-- The database is a single file (`/srv/gwt/data/gwl.db`); include it in the home server's backups.
+That still works while the scheduler is running: a file lock next to the database stops two sweeps from overlapping, and the second one exits with code 3.
+
+**Unraid:** this works as-is on Unraid. Map `/app/data` to appdata (e.g. `/mnt/user/appdata/great-wolf-tracker:/app/data`), make that folder writable by uid 1000, and map container port 8080. The compose file has the appdata path as a comment.
+
+**No authentication.** The dashboard is meant for the LAN only. Don't port-forward it or put it behind a public reverse proxy without adding auth first.
+
+### Configuration (environment variables)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GWT_SCHEDULE_ENABLED` | `true` | `false` = web only; sweeps only via `exec` / CLI |
+| `GWT_TZ` | `America/Toronto` | Timezone for the schedule (DST-aware) |
+| `GWT_FULL_SWEEP_CRON` | `17 3 * * 0` | Full sweep, standard 5-field crontab (0 or 7 = Sunday); `off` disables |
+| `GWT_FULL_SWEEP_DAYS` | `365` | Days covered by the full sweep |
+| `GWT_DAILY_SWEEP_CRON` | `43 5 * * *` | Short sweep; `off` disables |
+| `GWT_DAILY_SWEEP_DAYS` | `30` | Days covered by the short sweep |
+| `GWT_PORT` | `8080` | Web port inside the container (change the compose port mapping to match) |
+| `GWT_DB` | `/app/data/gwl.db` | SQLite path |
+| `GWT_USER_AGENT` | `great-wolf-tracker/<version> (...)` | User-Agent for API requests |
+
+Notes:
+- Both scheduled jobs use the default run ID (today's UTC date). On Sundays the daily sweep skips dates the weekly sweep has already captured.
+- Jobs that are missed while the container is down still run if it comes back within an hour. Otherwise they wait for the next slot.
+- The image has a `HEALTHCHECK` against `/healthz`.
+- Check the **Runs** page after the first few sweeps. **A run marked BLOCKED (403) means stop and reassess** (see Ground rules). Set `GWT_SCHEDULE_ENABLED=false` rather than letting it retry every day.
+- The database is a single file (`data/gwl.db`, plus `-wal`/`-shm` files while running); include the data folder in backups.
+
+## Web dashboard
+
+| Page | What it shows |
+|---|---|
+| `/` Overview | Calendar heatmap (week × weekday) of the next 365 arrival dates coloured by demand index. Hover shows rooms left, suite types sold out and min rate; click a day to open it. Also lists the quietest and busiest upcoming dates, and an ISO week × year heatmap that fills in as history builds |
+| `/date/YYYY-MM-DD` | Room-type table (suite, category, max occupancy, accessible, rooms left, cheapest rate per rate family, sold-out badge) plus a booking-curve chart of total rooms left and min rate at each scrape |
+| `/suites` | Every suite type with first/last seen. Flags suites missing from the latest run, and new ones |
+| `/suites/{code}` | One suite's rooms left and rate across all upcoming dates, plus its booking curve for a chosen arrival date (`?date=`) |
+| `/runs` | Each sweep: run ID, trigger, start/end, dates fetched/skipped/failed, failed requests, status (completed / aborted / BLOCKED (403) / interrupted), and the next scheduled runs |
+| `/trends` | Average demand per ISO week of the year, one line per year: the seasonality curve |
+
+Every page shows a "No data yet" message until the first sweep has stored something.
+
+JSON API (for Home Assistant etc.):
+
+| Route | Returns |
+|---|---|
+| `/api/overview` | Upcoming dates with demand index and components, plus the quietest / busiest lists |
+| `/api/dates/{YYYY-MM-DD}` | Latest snapshot, per-suite rows with rate families, booking curve (404 if never scraped) |
+| `/api/suites`, `/api/suites/{code}?date=` | Suite list; one suite's upcoming availability and booking curve |
+| `/api/trends` | ISO week × year average demand matrix |
+| `/api/runs` | Run log plus scheduler status and next run times |
+| `/healthz` | `{"status": "ok", ...}` with db / last completed run / scheduler state |
+
+For example, a Home Assistant `rest` sensor on `/api/overview` with a `value_template` that picks the first entry of `quietest` gives the quietest upcoming date.
 
 ## Ground rules
 
@@ -168,12 +229,13 @@ Then add the schedule with `crontab -e`:
 - [x] Endpoint discovery (network inspection of the booking flow): see [`docs/endpoints.md`](docs/endpoints.md)
 - [ ] Collector for rate + availability, one date (implemented; awaiting first live run on home server)
 - [ ] Full 365-day sweep + SQLite storage (implemented; awaiting first live run on home server)
-- [ ] Docker image + weekly schedule on home server (Dockerfile and cron docs done; deploy pending)
-- [ ] HTML heatmap report
+- [ ] Docker image + built-in schedule on home server (image, compose file and scheduler done; deploy pending)
+- [x] Built-in web dashboard (calendar + ISO-week heatmaps, date detail, room types, runs, trends) and JSON API
 - [ ] Day pass check
-- [ ] Google Trends + school calendar overlays
+- [ ] Google Trends + school calendar overlays on the dashboard
 - [ ] Tune demand index after ~3 months of data
+- [ ] Auth, if the dashboard ever leaves the LAN
 
 ## Stack
 
-Python 3.12 · httpx · SQLite · pandas · Plotly (static HTML) · Docker
+Python 3.12 · httpx · SQLite · FastAPI + Jinja2 + uvicorn · APScheduler · Plotly.js (pinned CDN) · Docker

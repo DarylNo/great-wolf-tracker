@@ -9,7 +9,14 @@ description = "Track demand at Great Wolf Lodge Niagara via public availability 
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.27,<1"]
+dependencies = [
+    "httpx>=0.27,<1",
+    "fastapi>=0.110,<1",
+    "uvicorn>=0.29,<1",
+    "jinja2>=3.1,<4",
+    "apscheduler>=3.10,<4",
+    "tzdata>=2024.1",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -19,6 +26,9 @@ gwt = "gwt.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["gwt*"]
+
+[tool.setuptools.package-data]
+"gwt.web" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

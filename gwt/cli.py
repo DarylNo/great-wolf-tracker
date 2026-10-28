@@ -1,25 +1,35 @@
-"""Command-line entry point: `python -m gwt sweep --days 365`."""
+"""Command-line entry point: `python -m gwt sweep|suites|serve`."""
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 from datetime import date
 from pathlib import Path
 
 from gwt import db
-from gwt.collector import make_client
-from gwt.sweep import SweepAborted, run_sweep
+from gwt.locking import SweepBusy
+from gwt.sweep import SweepAborted, execute_sweep
+
+EXIT_ABORTED = 1
+EXIT_USAGE = 2
+EXIT_BUSY = 3
+
+
+def _default_db() -> str:
+    return os.environ.get("GWT_DB") or str(db.DEFAULT_DB_PATH)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gwt", description="Great Wolf Lodge Niagara demand tracker")
     sub = parser.add_subparsers(dest="command", required=True)
+    db_help = "SQLite path (default $GWT_DB or data/gwl.db)"
 
     sweep = sub.add_parser("sweep", help="fetch availability for upcoming arrival dates")
     sweep.add_argument("--days", type=int, default=365, help="number of arrival dates from --start (default 365)")
     sweep.add_argument("--start", type=date.fromisoformat, default=None, help="first arrival date, YYYY-MM-DD (default: today UTC)")
-    sweep.add_argument("--db", default=str(db.DEFAULT_DB_PATH), help="SQLite path (default data/gwl.db)")
+    sweep.add_argument("--db", default=_default_db(), help=db_help)
     sweep.add_argument(
         "--run-id",
         default=None,
@@ -30,7 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     suites = sub.add_parser("suites", help="show stored suite availability for one arrival date")
     suites.add_argument("--date", type=date.fromisoformat, required=True, help="arrival date, YYYY-MM-DD")
     suites.add_argument("--code", default=None, help="suite code (e.g. SFSSB): show its booking curve across runs")
-    suites.add_argument("--db", default=str(db.DEFAULT_DB_PATH), help="SQLite path (default data/gwl.db)")
+    suites.add_argument("--db", default=_default_db(), help=db_help)
+
+    serve = sub.add_parser("serve", help="run the web dashboard (and the sweep scheduler unless disabled)")
+    serve.add_argument("--host", default=None, help="bind address (default $GWT_HOST or 0.0.0.0)")
+    serve.add_argument("--port", type=int, default=None, help="port (default $GWT_PORT or 8080)")
+    serve.add_argument("--db", default=None, help=db_help)
+    serve.add_argument("--no-scheduler", action="store_true", help="web only, same as GWT_SCHEDULE_ENABLED=false")
     return parser
 
 
@@ -125,16 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sweep":
         if args.days < 1:
             logging.error("--days must be >= 1")
-            return 2
-        conn = db.connect(args.db)
+            return EXIT_USAGE
         try:
-            with make_client() as client:
-                result = run_sweep(conn, client, days=args.days, start=args.start, run_id=args.run_id)
+            result = execute_sweep(args.db, days=args.days, start=args.start, run_id=args.run_id, trigger="cli")
+        except SweepBusy as exc:
+            logging.error("%s", exc)
+            return EXIT_BUSY
         except SweepAborted as exc:
             logging.error("%s", exc)
-            return 1
-        finally:
-            conn.close()
+            return EXIT_ABORTED
         logging.info(
             "run %s complete: fetched=%d skipped=%d failed_dates=%d",
             result.run_id,
@@ -145,4 +160,34 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "suites":
         return cmd_suites(args)
-    return 2
+    if args.command == "serve":
+        return cmd_serve(args)
+    return EXIT_USAGE
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    import dataclasses
+
+    import uvicorn
+
+    from gwt.config import ConfigError, Settings
+    from gwt.web.app import create_app
+
+    try:
+        settings = Settings.from_env()
+    except ConfigError as exc:
+        logging.error("bad configuration: %s", exc)
+        return EXIT_USAGE
+    overrides = {}
+    if args.db:
+        overrides["db_path"] = Path(args.db)
+    if args.host:
+        overrides["host"] = args.host
+    if args.port:
+        overrides["port"] = args.port
+    settings = dataclasses.replace(settings, **overrides)
+
+    app = create_app(settings, enable_scheduler=False if args.no_scheduler else None)
+    logging.info("serving on http://%s:%d (db %s)", settings.host, settings.port, settings.db_path)
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", access_log=False)
+    return 0

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_macros.html" import nodata %}
+{% block title %}{{ arrival }} · Great Wolf Tracker{% endblock %}
+{% block content %}
+<h1>Arrival {{ arrival }}</h1>
+
+{% if not has_data %}
+  {{ nodata() }}
+{% elif detail is none %}
+  <div class="empty"><strong>No snapshots for this date yet</strong>Sweeps cover the next 365 days from the day they run. <a href="/">Back to overview</a></div>
+{% else %}
+  {% set s = detail.snapshot %}
+  <p class="sub">Latest scrape {{ s.scraped_at }} (run {{ s.run_id }}). 1 night, 2 adults.</p>
+  <div class="stats">
+    <div class="stat"><div class="v">{{ s.demand if s.demand is not none else "-" }}</div><div class="k">demand index</div></div>
+    <div class="stat"><div class="v">{{ s.total_rooms_available }}</div><div class="k">rooms left</div></div>
+    <div class="stat"><div class="v">{{ s.suite_types_sold_out }}/{{ s.suite_types }}</div><div class="k">suite types sold out</div></div>
+    <div class="stat"><div class="v">{{ s.min_rate | money }}</div><div class="k">lowest available rate</div></div>
+    <div class="stat"><div class="v">{{ s.ref_suite_rate | money }}</div><div class="k">reference suite (SFSSB)</div></div>
+  </div>
+  {% if s.error_code %}<p><span class="badge bad">API error code: {{ s.error_code }}</span></p>{% endif %}
+
+  <h2>Room types</h2>
+  <div class="tablewrap"><table>
+    <tr>
+      <th>Suite</th><th>Category</th><th class="num">Max occ.</th><th>Accessible</th><th class="num">Rooms left</th>
+      {% for f in detail.families %}<th class="num">{{ f }}</th>{% endfor %}
+      <th></th>
+    </tr>
+    {% for r in detail.suites %}
+    <tr class="{{ 'soldout' if r.sold_out }}">
+      <td><a href="/suites/{{ r.suite_code }}?date={{ arrival }}">{{ r.suite_name }}</a> <span class="sub">{{ r.suite_code }}</span></td>
+      <td>{{ r.suite_category or "-" }}</td>
+      <td class="num">{{ r.max_occupancy if r.max_occupancy is not none else "-" }}</td>
+      <td>{{ r.is_accessible | yesno }}</td>
+      <td class="num">{{ r.available_room_count }}</td>
+      {% for f in detail.families %}<td class="num">{{ r.rates.get(f) | money }}</td>{% endfor %}
+      <td>{% if r.sold_out %}<span class="badge bad">Sold out</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+
+  <h2>Booking curve</h2>
+  <p class="sub">Total rooms left and lowest rate at each scrape of this date ({{ detail.curve | length }} so far).</p>
+  <div class="panel"><div id="curve" class="chart"></div></div>
+  <script>
+    const c = {{ detail.curve | tojson }};
+    gwtPlot('curve', [
+      { type: 'scatter', mode: 'lines+markers', name: 'Rooms left', x: c.map(r => r.scraped_at),
+        y: c.map(r => r.total_rooms_available), line: { color: '#2f6f9f' } },
+      { type: 'scatter', mode: 'lines+markers', name: 'Min rate ($)', x: c.map(r => r.scraped_at),
+        y: c.map(r => r.min_rate), yaxis: 'y2', line: { color: '#e5733b', dash: 'dot' } },
+    ], {
+      xaxis: { type: 'date', title: { text: 'Scraped' } },
+      yaxis: { title: { text: 'Rooms left' }, rangemode: 'tozero' },
+      yaxis2: { title: { text: 'Min rate ($)' }, overlaying: 'y', side: 'right', showgrid: false },
+      margin: { l: 56, r: 64, t: 12, b: 44 },
+    });
+  </script>
+{% endif %}
+{% endblock %}

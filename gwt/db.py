@@ -67,6 +67,24 @@ CREATE TABLE IF NOT EXISTS suites (
     last_seen               TEXT    NOT NULL    -- scraped_at of latest sighting
 );
 
+-- One row per sweep invocation (a resumed run_id gets a new row).
+CREATE TABLE IF NOT EXISTS runs (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                  TEXT    NOT NULL,
+    trigger                 TEXT,               -- cli / schedule:weekly / schedule:daily
+    started_at              TEXT    NOT NULL,
+    finished_at             TEXT,
+    start_date              TEXT,               -- first arrival date requested
+    days                    INTEGER,
+    fetched                 INTEGER NOT NULL DEFAULT 0,
+    skipped                 INTEGER NOT NULL DEFAULT 0,   -- already captured under this run_id
+    failed_dates            INTEGER NOT NULL DEFAULT 0,
+    failures                INTEGER NOT NULL DEFAULT 0,   -- failed requests incl. retried ones
+    status                  TEXT    NOT NULL,   -- running / completed / aborted / error / interrupted
+    blocked                 INTEGER NOT NULL DEFAULT 0,   -- 1 if stopped by HTTP 403
+    message                 TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_snapshots_arrival ON snapshots (arrival_date, scraped_at);
 CREATE INDEX IF NOT EXISTS idx_suite_snapshots_arrival ON suite_snapshots (arrival_date, suite_code, scraped_at);
 CREATE INDEX IF NOT EXISTS idx_suite_rate_families_parent ON suite_rate_families (suite_snapshot_id);
@@ -95,13 +113,76 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """Read-write connection; creates the file and schema if needed."""
     path = Path(path)
-    if str(path) != ":memory:":
+    conn_target = str(path)
+    if conn_target != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(conn_target, timeout=30)
+    if conn_target != ":memory:":
+        # WAL lets the web dashboard read while a sweep is writing.
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn
+
+
+def connect_readonly(path: str | Path) -> sqlite3.Connection | None:
+    """Read-only connection for the web app, or None if the database doesn't exist yet."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# --------------------------------------------------------------------------- runs
+
+
+def start_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    trigger: str,
+    started_at: str,
+    start_date: str,
+    days: int,
+    skipped: int,
+) -> int:
+    with conn:
+        cur = conn.execute(
+            """INSERT INTO runs (run_id, trigger, started_at, start_date, days, skipped, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'running')""",
+            (run_id, trigger, started_at, start_date, days, skipped),
+        )
+    return int(cur.lastrowid)
+
+
+_RUN_FIELDS = {"finished_at", "fetched", "failed_dates", "failures", "status", "blocked", "message"}
+
+
+def update_run(conn: sqlite3.Connection, run_row_id: int, **fields) -> None:
+    unknown = set(fields) - _RUN_FIELDS
+    if unknown:
+        raise ValueError(f"unknown run fields: {unknown}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    with conn:
+        conn.execute(f"UPDATE runs SET {assignments} WHERE id = ?", (*fields.values(), run_row_id))
+
+
+def mark_interrupted(conn: sqlite3.Connection, finished_at: str) -> int:
+    """Close out 'running' rows left by a crashed/killed sweep. Call only while holding the sweep lock."""
+    with conn:
+        cur = conn.execute(
+            """UPDATE runs SET status = 'interrupted', finished_at = ?,
+                   message = COALESCE(message, 'process ended before the run finished')
+               WHERE status = 'running'""",
+            (finished_at,),
+        )
+    return cur.rowcount
 
 
 def captured_dates(conn: sqlite3.Connection, run_id: str) -> set[str]:
