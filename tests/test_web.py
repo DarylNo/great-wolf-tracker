@@ -445,10 +445,22 @@ def test_pause_banner_on_plan_and_runs_until_unblocked(single_db):
         assert c.get("/healthz").json()["collection_paused"] is None
 
 
+BAD_EVENTS = {
+    "unquoted ON": ("events:\n  - {region: ON, name: X, start: 2027-01-01, end: 2027-01-01, source: s, "
+                    "official: true}\n", "quote it"),
+    "events: 5": ("events: 5\n", "must be a list"),
+    "events: true": ("events: true\n", "must be a list"),
+    "empty file": ("", "no &#39;events&#39; list"),
+    "no events key": ("exclude_holidays: {}\n", "no &#39;events&#39; list"),
+}
+
+
+@pytest.mark.parametrize("case", list(BAD_EVENTS))
 @pytest.mark.parametrize("path", ["/", "/seasonality", "/date/2026-11-21", "/suites", "/runs", "/healthz"])
-def test_bad_events_file_falls_back_with_a_banner(demo_db, tmp_path, monkeypatch, path):
+def test_bad_events_file_falls_back_with_a_banner(demo_db, tmp_path, monkeypatch, path, case):
+    content, message = BAD_EVENTS[case]
     bad = tmp_path / "calendar_events.yaml"
-    bad.write_text("events:\n  - {region: ON, name: X, start: 2027-01-01, end: 2027-01-01, source: s, official: true}\n")
+    bad.write_text(content)
     monkeypatch.setenv("GWT_EVENTS_FILE", str(bad))
     with make_client(demo_db) as c:
         r = c.get(path)
@@ -456,7 +468,7 @@ def test_bad_events_file_falls_back_with_a_banner(demo_db, tmp_path, monkeypatch
     if path == "/healthz":
         assert r.json()["events_problem"]["file"] == str(bad)
         return
-    assert f"School calendar file <code>{bad}</code>" in r.text and "quote it" in r.text
+    assert f"School calendar file <code>{bad}</code>" in r.text and message in r.text
     if path == "/":  # the bundled calendar is still used
         assert "NY: Thanksgiving recess" in r.text
 

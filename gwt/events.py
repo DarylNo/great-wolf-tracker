@@ -19,7 +19,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -79,6 +79,8 @@ def events_file() -> Path:
 
 
 def _as_date(value, field: str, index: int) -> date:
+    if isinstance(value, datetime):  # YAML reads "2026-12-21 10:00:00" as a datetime
+        return value.date()
     if isinstance(value, date):
         return value
     try:
@@ -98,8 +100,13 @@ def parse_events_yaml(text: str) -> tuple[list[CalendarEvent], dict[str, set[str
         raise EventsFileError(f"not valid YAML{at}: {reason}") from exc
     if not isinstance(doc, dict):
         raise EventsFileError("top level must be a mapping with an 'events' list")
+    if "events" not in doc:
+        raise EventsFileError("the file has no 'events' list (empty file?); write 'events: []' to list none")
+    raw_events = doc["events"] if doc["events"] is not None else []
+    if not isinstance(raw_events, list):
+        raise EventsFileError(f"'events' must be a list of events, got {type(raw_events).__name__}")
     events = []
-    for i, raw in enumerate(doc.get("events") or [], start=1):
+    for i, raw in enumerate(raw_events, start=1):
         if not isinstance(raw, dict):
             raise EventsFileError(f"event #{i} must be a mapping")
         missing = [k for k in ("region", "name", "start", "end", "source", "official") if k not in raw]
@@ -161,6 +168,8 @@ def load_school_events(path: Path | None = None) -> tuple[list[CalendarEvent], d
                 cached = str(exc)
             except (OSError, UnicodeDecodeError) as exc:
                 cached = f"can't read {path}: {getattr(exc, 'strerror', None) or exc}"
+            except Exception as exc:  # anything else wrong with the contents is a file problem too
+                cached = f"invalid events file: {type(exc).__name__}: {exc}"
             if isinstance(cached, str):
                 log.error("events file %s is unusable: %s", path, cached)
             if len(_file_cache) >= 8:

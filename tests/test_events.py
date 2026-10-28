@@ -206,6 +206,14 @@ def test_events_file_override(tmp_path, monkeypatch):
         ("events:\n  - {region: ON, name: X, start: 2027-01-01, end: 2027-01-01, source: s, official: true}\n",
          "quote"),
         (b"\xff\xfe\x00bad", "can't read"),
+        ("events: 5\n", "'events' must be a list"),
+        ("events: true\n", "'events' must be a list"),
+        ("", "no 'events' list"),
+        ("exclude_holidays: {}\n", "no 'events' list"),
+        ("events:\n  - {region: 'ON', name: X, start: 2026-12-21, end: [1], source: s, official: true}\n",
+         "YYYY-MM-DD"),
+        ("events:\n  - {region: 'ON', name: X, start: 2026-12-21, end: 2026-12-22, source: s, official: true}\n"
+         "exclude_holidays: {'ON': 5}\n", "must be a list of holiday names"),
     ],
 )
 def test_unusable_events_file_falls_back_to_the_bundled_calendar(tmp_path, monkeypatch, caplog, content, message):
@@ -228,3 +236,35 @@ def test_unusable_events_file_falls_back_to_the_bundled_calendar(tmp_path, monke
     custom.write_text("events: []\n")
     os.utime(custom, (1_900_000_000, 1_900_000_000))
     assert events.events_problem() is None
+
+
+def test_datetime_values_are_read_as_dates(tmp_path, monkeypatch):
+    custom = tmp_path / "events.yaml"
+    custom.write_text("events:\n  - {region: 'ON', name: Long weekend, start: 2027-10-04 10:00:00, "
+                      "end: 2027-10-08 18:30:00, source: test, official: false}\n")
+    monkeypatch.setenv("GWT_EVENTS_FILE", str(custom))
+    cal = events.calendar_for_range(date(2027, 9, 1), date(2027, 10, 31))
+    assert events.events_problem() is None
+    assert any("Long weekend" in f.text for f in cal.night_flags(date(2027, 10, 3)))
+
+
+def test_unexpected_errors_while_parsing_are_file_problems(tmp_path, monkeypatch):
+    custom = tmp_path / "events.yaml"
+    custom.write_text("events: []\n")
+    monkeypatch.setenv("GWT_EVENTS_FILE", str(custom))
+
+    real = events.parse_events_yaml
+
+    def boom(text):
+        if text == "events: []\n":  # only the custom file; the bundled one still parses
+            raise TypeError("something odd in the file")
+        return real(text)
+
+    monkeypatch.setattr(events, "parse_events_yaml", boom)
+    cal = events.calendar_for_range(date(2026, 10, 1), date(2027, 9, 30))
+    assert cal.problem and "something odd" in cal.problem["error"]
+    monkeypatch.undo()
+
+
+def test_an_explicitly_empty_events_list_is_fine():
+    assert parse_events_yaml("events: []\n") == ([], {})
