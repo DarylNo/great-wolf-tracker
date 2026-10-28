@@ -9,20 +9,22 @@ description = "Track demand at Great Wolf Lodge Niagara via public availability 
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
+# Ranges for `pip install .`; the Docker image installs the exact versions in
+# requirements.lock (regenerate it after changing anything here; see the README).
 dependencies = [
     "httpx>=0.27,<1",
     "fastapi>=0.110,<1",
     "uvicorn>=0.29,<1",
     "jinja2>=3.1,<4",
-    "apscheduler>=3.10,<4",
-    "tzdata>=2024.1",
-    "plotly>=7.1,<8",
-    "holidays>=0.60",
-    "pyyaml>=6",
+    "apscheduler>=3.10,<4",  # 4.x is a different API
+    "tzdata>=2024.1",        # time zone data only, versioned by date: newer is always wanted
+    "plotly>=7.1,<8",        # only for the bundled plotly.min.js the dashboard serves
+    "holidays>=0.60,<1",
+    "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8,<10", "pyflakes>=3,<5"]
 
 [project.scripts]
 gwt = "gwt.cli:main"
