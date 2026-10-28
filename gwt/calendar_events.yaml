@@ -5,7 +5,9 @@
 # school-closure day for that region (a break, PA day or holiday) and is not a regular
 # weekend day (Saturday/Sunday). Those are the nights families can stay without missing
 # school. Public holidays for Ontario (CA-ON) and New York (US-NY) are merged in
-# automatically from the `holidays` Python package, so they don't need to be listed here.
+# automatically from the `holidays` Python package, so they don't need to be listed here;
+# but on a day a school-board entry covers, the board entry is the only label shown.
+# Names under exclude_holidays (bottom of the file) are dropped from the package's list.
 #
 # Fields
 #   region    "ON" (Ontario) or "NY" (New York). Keep the quotes: unquoted ON means "true" in YAML.
@@ -85,6 +87,32 @@ events:
     official: true
 
   # --- New York: Buffalo Public Schools 2026-27 (unofficial third-party compilation) -------
+  # Every no-school day is listed explicitly, including the federal/state holidays the
+  # `holidays` package would also supply, so this list alone says when Buffalo schools close.
+  - region: "NY"
+    name: Labor Day
+    start: 2026-09-07
+    end: 2026-09-07
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Columbus Day
+    start: 2026-10-12
+    end: 2026-10-12
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Election Day
+    start: 2026-11-03
+    end: 2026-11-03
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Veterans Day
+    start: 2026-11-11
+    end: 2026-11-11
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
   - region: "NY"
     name: Thanksgiving recess
     start: 2026-11-25
@@ -98,7 +126,13 @@ events:
     source: https://calendarstates.com/new-york/buffalo-public-schools/
     official: false
   - region: "NY"
-    name: Presidents' Day
+    name: Martin Luther King Jr. Day
+    start: 2027-01-18
+    end: 2027-01-18
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: "Presidents' Day"
     start: 2027-02-15
     end: 2027-02-15
     source: https://calendarstates.com/new-york/buffalo-public-schools/
@@ -122,6 +156,18 @@ events:
     source: https://calendarstates.com/new-york/buffalo-public-schools/
     official: false
   - region: "NY"
+    name: Memorial Day
+    start: 2027-05-31
+    end: 2027-05-31
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
+    name: Juneteenth (observed)
+    start: 2027-06-18
+    end: 2027-06-18
+    source: https://calendarstates.com/new-york/buffalo-public-schools/
+    official: false
+  - region: "NY"
     name: Last student day
     start: 2027-06-24
     end: 2027-06-24
@@ -129,10 +175,12 @@ events:
     official: false
     closure: false   # school is in session that day; summer recess starts after (end date not yet known)
 
-# Optional: public-holiday names from the `holidays` package to ignore, per region. The
-# package includes some New York state commemorations that may not close schools; uncomment
-# to drop them once you've confirmed with the school calendar.
-# exclude_holidays:
-#   "NY":
-#     - "Lincoln's Birthday"
-#     - "Susan B. Anthony Day"
+# Public-holiday names from the `holidays` package to ignore, per region. New York's
+# package calendar includes state commemorations that don't close Buffalo schools: Lincoln's
+# Birthday (Feb 12) and Susan B. Anthony Day (Feb 15) aren't on the Buffalo no-school list
+# (Feb 15 2027 is off anyway, as Presidents' Day, listed above). Election Day and Veterans
+# Day DO close Buffalo schools, so those stay.
+exclude_holidays:
+  "NY":
+    - "Lincoln's Birthday"
+    - "Susan B. Anthony Day"

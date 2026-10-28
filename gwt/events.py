@@ -5,11 +5,17 @@ that region (a break, PA day or public holiday) and is not a regular weekend day
 
 Closure days come from `gwt/calendar_events.yaml` (school boards; override the file with
 GWT_EVENTS_FILE) plus public holidays from the `holidays` package for Ontario (CA-ON) and
-New York (US-NY), computed for whichever years are being shown.
+New York (US-NY), computed for whichever years are being shown. Where a school-board entry
+covers a day, it's the authority for that region and day: the package's holiday names for
+that day are not added on top (so "Presidents' Day" isn't doubled as "Washington's Birthday").
+
+A GWT_EVENTS_FILE that can't be read or parsed doesn't take the dashboard down: it's logged,
+the bundled calendar is used instead, and `events_problem()` reports it for a page banner.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import dataclass
@@ -18,6 +24,8 @@ from pathlib import Path
 from typing import Iterable
 
 import yaml
+
+log = logging.getLogger("gwt.events")
 
 DEFAULT_EVENTS_FILE = Path(__file__).with_name("calendar_events.yaml")
 
@@ -81,7 +89,13 @@ def _as_date(value, field: str, index: int) -> date:
 
 def parse_events_yaml(text: str) -> tuple[list[CalendarEvent], dict[str, set[str]]]:
     """Parse the YAML document into events plus the optional per-region holiday exclusions."""
-    doc = yaml.safe_load(text) or {}
+    try:
+        doc = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        where = getattr(exc, "problem_mark", None)
+        at = f" (line {where.line + 1}, column {where.column + 1})" if where is not None else ""
+        reason = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+        raise EventsFileError(f"not valid YAML{at}: {reason}") from exc
     if not isinstance(doc, dict):
         raise EventsFileError("top level must be a mapping with an 'events' list")
     events = []
@@ -111,29 +125,80 @@ def parse_events_yaml(text: str) -> tuple[list[CalendarEvent], dict[str, set[str
             )
         )
     exclusions = {}
-    for region, names in (doc.get("exclude_holidays") or {}).items():
+    raw_exclusions = doc.get("exclude_holidays") or {}
+    if not isinstance(raw_exclusions, dict):
+        raise EventsFileError("exclude_holidays must map a region to a list of holiday names")
+    for region, names in raw_exclusions.items():
         if isinstance(region, bool):
             raise EventsFileError('exclude_holidays: a region key was read as a boolean; quote it, e.g. "ON":')
+        if isinstance(names, str) or not isinstance(names, (list, type(None))):
+            raise EventsFileError(f"exclude_holidays: {region} must be a list of holiday names")
         exclusions[str(region).upper()] = {str(n) for n in (names or [])}
     return events, exclusions
 
 
 _cache_lock = threading.Lock()
-_file_cache: dict[tuple[str, float], tuple[list[CalendarEvent], dict[str, set[str]]]] = {}
+# (path, mtime) -> parsed (events, exclusions), or the error message if the file is unusable
+_file_cache: dict[tuple[str, float], tuple[list[CalendarEvent], dict[str, set[str]]] | str] = {}
 
 
 def load_school_events(path: Path | None = None) -> tuple[list[CalendarEvent], dict[str, set[str]]]:
+    """Parse one events file (cached until its mtime changes). Raises EventsFileError."""
     path = path or events_file()
     try:
         mtime = path.stat().st_mtime
     except FileNotFoundError as exc:
         raise EventsFileError(f"events file not found: {path}") from exc
+    except OSError as exc:
+        raise EventsFileError(f"can't read {path}: {exc.strerror or exc}") from exc
     key = (str(path), mtime)
     with _cache_lock:
-        if key not in _file_cache:
-            _file_cache.clear()
-            _file_cache[key] = parse_events_yaml(path.read_text(encoding="utf-8"))
-        return _file_cache[key]
+        cached = _file_cache.get(key)
+        if cached is None:
+            try:
+                cached = parse_events_yaml(path.read_text(encoding="utf-8"))
+            except EventsFileError as exc:
+                cached = str(exc)
+            except (OSError, UnicodeDecodeError) as exc:
+                cached = f"can't read {path}: {getattr(exc, 'strerror', None) or exc}"
+            if isinstance(cached, str):
+                log.error("events file %s is unusable: %s", path, cached)
+            if len(_file_cache) >= 8:
+                _file_cache.clear()
+            _file_cache[key] = cached
+    if isinstance(cached, str):
+        raise EventsFileError(cached)
+    return cached
+
+
+def school_events(
+    path: Path | None = None,
+) -> tuple[list[CalendarEvent], dict[str, set[str]], dict[str, str] | None]:
+    """Events from `path` (default: GWT_EVENTS_FILE or the bundled file), falling back to the
+    bundled file when a custom one is unusable. Returns (events, exclusions, problem)."""
+    path = path or events_file()
+    try:
+        school, exclusions = load_school_events(path)
+        return school, exclusions, None
+    except EventsFileError as exc:
+        if path == DEFAULT_EVENTS_FILE:
+            raise  # the bundled calendar itself is broken: a packaging bug, not a config problem
+        problem = {"file": str(path), "error": str(exc)}
+    school, exclusions = load_school_events(DEFAULT_EVENTS_FILE)
+    return school, exclusions, problem
+
+
+def events_problem() -> dict[str, str] | None:
+    """{'file', 'error'} when GWT_EVENTS_FILE is set but unusable (the bundled calendar is
+    being shown instead), else None. Cheap: parse results are cached by file mtime."""
+    path = events_file()
+    if path == DEFAULT_EVENTS_FILE:
+        return None
+    try:
+        load_school_events(path)
+    except EventsFileError as exc:
+        return {"file": str(path), "error": str(exc)}
+    return None
 
 
 def holiday_events(years: Iterable[int], exclusions: dict[str, set[str]] | None = None) -> list[CalendarEvent]:
@@ -165,31 +230,33 @@ def holiday_events(years: Iterable[int], exclusions: dict[str, set[str]] | None 
 class ClosureCalendar:
     """Closure days per region, and the nights they flag."""
 
-    def __init__(self, events: Iterable[CalendarEvent]):
+    def __init__(self, events: Iterable[CalendarEvent], problem: dict[str, str] | None = None):
         self.events = list(events)
+        self.problem = problem  # set when a custom events file was unusable (see school_events)
         self._closures: dict[str, dict[date, list[str]]] = {r: {} for r in REGIONS}
         self._info: dict[date, list[str]] = {}
-        seen: dict[tuple[str, date], set[str]] = {}
-        # School-board entries first, so a public holiday the board already lists
-        # (e.g. "Victoria Day") isn't shown twice.
+        school_days: set[tuple[str, date]] = set()
+        # School-board entries first. A day a board lists is labelled by the board only: the
+        # package's holiday names for that region/day are skipped, so a board's "Presidents'
+        # Day" isn't repeated as "Washington's Birthday (public holiday)".
         for ev in sorted(self.events, key=lambda e: e.kind != "school"):
             d = ev.start
             while d <= ev.end:
-                if ev.closure:
-                    names = self._closures.setdefault(ev.region, {}).setdefault(d, [])
-                    known = seen.setdefault((ev.region, d), set())
-                    base = ev.name.casefold()
-                    if base not in known:
-                        known.add(base)
-                        names.append(ev.name + (" (public holiday)" if ev.kind == "holiday" else ""))
-                else:
+                if not ev.closure:
                     self._info.setdefault(d, []).append(ev.label)
+                elif ev.kind == "school":
+                    school_days.add((ev.region, d))
+                    names = self._closures.setdefault(ev.region, {}).setdefault(d, [])
+                    if ev.name not in names:
+                        names.append(ev.name)
+                elif (ev.region, d) not in school_days:
+                    self._closures.setdefault(ev.region, {}).setdefault(d, []).append(ev.name + " (public holiday)")
                 d += timedelta(days=1)
 
     @classmethod
     def for_years(cls, years: Iterable[int], path: Path | None = None) -> "ClosureCalendar":
-        school, exclusions = load_school_events(path)
-        return cls([*school, *holiday_events(years, exclusions)])
+        school, exclusions, problem = school_events(path)
+        return cls([*school, *holiday_events(years, exclusions)], problem)
 
     @classmethod
     def for_range(cls, start: date, end: date, path: Path | None = None) -> "ClosureCalendar":
