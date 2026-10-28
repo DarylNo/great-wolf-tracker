@@ -20,3 +20,5 @@ services:
       GWT_DAILY_SWEEP_DAYS: "30"
       # GWT_PORT: "8080"
       # GWT_USER_AGENT: "great-wolf-tracker/0.1 (...)"
+      # GWT_EVENTS_FILE: /app/data/calendar_events.yaml   # edit school dates without a rebuild
+      # GWT_FINAL_FILL_MAX_LEAD: "2"
