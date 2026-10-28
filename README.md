@@ -26,9 +26,9 @@ Optional enrichment (later):
 
 1. **Collector** (`gwt/collector.py`): calls the availability JSON API the booking site itself uses (`prod.api.greatwolf.com/room-booking/v2/lodges/NIAGON/availability`) for one arrival date, then parses the response into a run-level row plus one row per suite type. The raw response is kept with every `pricingKey` (signed booking token) stripped.
 2. **Storage** (`gwt/db.py`): SQLite (`data/gwl.db`). Each run appends rows; nothing is overwritten, so we can see how a date's inventory and price move as it approaches (booking-curve data).
-3. **Sweep** (`python -m gwt sweep --days 365`): single-threaded with a jittered 3–5 s delay between requests. It backs off exponentially on 429/5xx, aborts after 5 consecutive failures, and stops immediately on 403. It is resumable: re-running with the same run ID skips dates already captured.
-   Every invocation is logged to a `runs` table (counts, failures, aborted / blocked).
-4. **Scheduler** (`gwt/scheduler.py`): APScheduler runs inside the container next to the web server. By default it does a full 365-day sweep on Sundays at 03:17 and a 30-day sweep daily at 05:43 (America/Toronto). A file lock means two sweeps never overlap, including one started by hand with `docker compose exec`.
+3. **Sweep** (`python -m gwt sweep --days 365`): single-threaded with a jittered 3–5 s delay between requests, starting from today's date in Toronto. It backs off exponentially on 429/5xx and honours `Retry-After` up to 10 minutes (a longer one ends the run as **rate-limited** rather than holding the sweep open), aborts after 5 consecutive failures, and stops immediately on 403, which also **pauses collection** until you run `gwt unblock` (see [Blocked runs](#blocked-runs-403)). It is resumable: re-running with the same run ID skips dates already captured.
+   Every invocation is logged to a `runs` table (counts, failures, aborted / blocked / rate-limited / interrupted).
+4. **Scheduler** (`gwt/scheduler.py`): APScheduler runs inside the container next to the web server. By default it does a full 365-day sweep on Sundays at 03:17 and a 38-day sweep daily at 05:43 (America/Toronto). A file lock means two sweeps never overlap, including one started by hand with `docker compose exec`. When the container stops, a running sweep stops between dates, records itself as interrupted, and the container exits cleanly.
 5. **Metrics** (`gwt/metrics.py`): every number on the dashboard is defined there, with real units (see below).
 6. **School closures** (`gwt/events.py`, `gwt/calendar_events.yaml`): marks the nights families can stay without missing school.
 7. **Web dashboard** (`gwt/web/`): FastAPI with server-rendered Jinja templates. Charts use Plotly.js served locally from the `plotly` pip package, so it works offline on the LAN and needs no frontend build. It reads the database read-only and also serves a JSON API under `/api/...`. See [Web dashboard](#web-dashboard).
@@ -56,7 +56,7 @@ There is deliberately no composite "demand index". An earlier weighted index mis
 
 ```
 snapshots(                          -- one row per arrival date per run
-  run_id                 TEXT,      -- groups one sweep (default: UTC date); used for resume
+  run_id                 TEXT,      -- groups one sweep (default: today's date in Toronto); used for resume
   scraped_at             TEXT,      -- UTC timestamp
   arrival_date           TEXT,      -- YYYY-MM-DD
   total_rooms_available  INTEGER,   -- sum of availableRoomCount
@@ -65,7 +65,8 @@ snapshots(                          -- one row per arrival date per run
   min_rate               REAL,      -- lowest totalNightlyRate among suites with rooms
   ref_suite_rate         REAL,      -- lowest totalNightlyRate for SFSSB (NULL if sold out)
   error_code             TEXT,      -- response errorCode
-  raw_json               TEXT       -- response with pricingKey stripped, for re-parsing
+  raw_json               TEXT       -- response with pricingKey stripped, for re-parsing; stored
+                                    -- zlib-compressed (BLOB), rows from older builds are plain TEXT
 )
 
 suite_snapshots(                    -- one row per suite type per arrival date per run
@@ -113,19 +114,22 @@ runs(                               -- one row per sweep invocation (a resumed r
   days                   INTEGER,
   fetched, skipped, failed_dates INTEGER,
   failures               INTEGER,   -- failed requests, including retried ones
-  status                 TEXT,      -- running / completed / aborted / error / interrupted
+  status                 TEXT,      -- running / completed / aborted / rate_limited / error / interrupted
   blocked                INTEGER,   -- 1 if the run stopped on HTTP 403
   message                TEXT       -- abort / error reason
 )
 
-meta(key TEXT PRIMARY KEY, value TEXT)  -- facts about the database (synthetic_demo = 1 for gwt demo-db)
+meta(key TEXT PRIMARY KEY, value TEXT)  -- facts about the database: synthetic_demo = 1 for gwt demo-db,
+                                        -- unblocked_run_id = the last 403 that `gwt unblock` cleared
 ```
 
 **Rooms vs suite codes.** The API's ~27 suite codes include accessible and bedding variants of the same room (e.g. four "Timber Wolf Cottage" codes), so the dashboard groups codes by `suite_brand` into ~17 rooms (`gwt/rooms.py`). A room's rooms left is the sum over its variants, and it's sold out only when every variant is at 0.
 
 **Accessibility, beds and baths** come straight from each suite in the API response: `isAccessible` (boolean, stored as 1/0), and `numOfBeds` / `numOfBaths` (sent as strings like `"2"`, stored as integers). A missing or unparseable value is stored as NULL. See [`docs/endpoints.md`](docs/endpoints.md).
 
-Older databases get new columns (and the `suites` max/min backfill) added automatically on connect.
+**Upgrades migrate the database automatically**, in one transaction (all of it applies or none of it does): new tables, columns and indexes, then backfills (the `suites` max/min columns) that only touch rows still empty, so an interrupted upgrade is simply finished on the next start. The web server migrates before it serves its first request, waiting up to 10 s for a running sweep's lock; every CLI command migrates on connect too. Back up first anyway: see [Upgrading](#upgrading).
+
+**Size.** With the default schedule the database grows by roughly 350 MB a year (about 31,000 arrival-date snapshots, each with ~27 suite rows, their rate families and indexes). `raw_json` is stored zlib-compressed, about 2 KB instead of 17 KB per snapshot, which saves ~450 MB a year; rows written by older builds stay as plain text and are read the same way.
 
 ## School closures
 
@@ -133,19 +137,24 @@ A night is marked when the **next morning is a school-closure day** (a break, PA
 
 Closure days come from two places:
 
-- [`gwt/calendar_events.yaml`](gwt/calendar_events.yaml): school-board dates, each with `region`, `name`, `start`, `end` (inclusive), `source` and `official`. Seeded with the TDSB 2026-27 key dates (official) and a Buffalo Public Schools 2026-27 compilation (unofficial, third-party), with sources cited in the file. Entries with `closure: false` (e.g. Buffalo's last student day) are shown as tags but never mark a night.
-- Public holidays for Ontario (CA-ON) and New York (US-NY) from the [`holidays`](https://pypi.org/project/holidays/) package, computed for whichever years are on screen. The package includes some New York commemorations (e.g. Lincoln's Birthday) that may not close schools; the YAML has a commented-out `exclude_holidays` block to drop them.
+- [`gwt/calendar_events.yaml`](gwt/calendar_events.yaml): school-board dates, each with `region`, `name`, `start`, `end` (inclusive), `source` and `official`. Seeded with the TDSB 2026-27 key dates (official) and the Buffalo Public Schools 2026-27 no-school days from a third-party compilation (`official: false`), every one listed explicitly, holidays included, with sources cited in the file. Entries with `closure: false` (e.g. Buffalo's last student day) are shown as tags but never mark a night.
+- Public holidays for Ontario (CA-ON) and New York (US-NY) from the [`holidays`](https://pypi.org/project/holidays/) package, computed for whichever years are on screen. The YAML's `exclude_holidays` drops New York's Lincoln's Birthday and Susan B. Anthony Day, which are school days in Buffalo (Election Day and Veterans Day do close schools and stay). On a day a school-board entry covers, the board's name is the only label shown, so "Presidents' Day" isn't repeated as "Washington's Birthday".
 
-**Adding next year's dates:** append entries for the new school year to the YAML when the boards publish their calendars, with the source URL (`official: false` for third-party compilations). Keep the quotes around `"ON"` (unquoted `ON` means "true" in YAML). Don't guess dates: the file has TODOs for the Ontario summer break and the 2027-28 year. Either edit the file and rebuild the image, or copy it next to the database (e.g. `/app/data/calendar_events.yaml`) and point `GWT_EVENTS_FILE` at it, so it can be edited without a rebuild.
+For 2026-27 that marks these New York nights from November to June: Nov 2, Nov 10, Nov 24–26, Dec 23–24, Dec 27–31, Jan 17, Feb 14–18, Mar 25, Mar 29–Apr 1, May 30 and Jun 17 (`tests/test_events.py` checks the exact list).
+
+**Adding next year's dates:** append entries for the new school year to the YAML when the boards publish their calendars, with the source URL (`official: false` for third-party compilations). Keep the quotes around `"ON"` (unquoted `ON` means "true" in YAML). Don't guess dates: the file has TODOs for the Ontario summer break and the 2027-28 year. Either edit the file and rebuild the image, or copy it next to the database (e.g. `/app/data/calendar_events.yaml`) and point `GWT_EVENTS_FILE` at it, so it can be edited without a rebuild. If that file can't be read or parsed, the dashboard keeps working on the bundled calendar, logs the error, and shows a banner naming the file and the problem until it's fixed.
 
 ## Running locally
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'
+pip install -c requirements.lock -e '.[dev]'   # the exact versions the Docker image uses
 pytest                                  # offline tests (fixtures + a small synthetic demo database)
+python -m pyflakes gwt tests scripts
 python -m gwt sweep --days 7 -v         # small live run
 python -m gwt sweep --days 365          # full sweep (~25-30 min at 3-5 s/request)
+python -m gwt backup --out backups/gwl.db  # consistent copy, safe while the database is in use
+python -m gwt unblock                   # resume after reviewing a blocked (403) run
 
 # Query what's stored
 python -m gwt suites --date 2026-11-21               # latest snapshot: every suite code for that night
@@ -161,13 +170,15 @@ python -m gwt serve --no-scheduler --db /tmp/gwt-demo.db
 
 `suites --date` prints suite name, code, category, rooms left, cheapest rate and a SOLD OUT flag, using the most recent scrape of that date. Adding `--code` prints one row per scrape run with days before arrival (`lead_days`), rooms left, cheapest rate, the cheapest rate in each rate family (Saver, Flexible, ...) and a sold-out flag. Both take `--db PATH`.
 
-Sweep options: `--start YYYY-MM-DD` (first arrival date, default today UTC), `--db PATH` (default `$GWT_DB` or `data/gwl.db`), `--run-id ID` (re-use one to resume an interrupted sweep; default is today's UTC date, so re-running the same day resumes automatically). Set `GWT_USER_AGENT` to override the User-Agent.
+Sweep options: `--start YYYY-MM-DD` (first arrival date, default today in Toronto), `--db PATH` (default `$GWT_DB` or `data/gwl.db`), `--run-id ID` (re-use one to resume an interrupted sweep; default is today's date in Toronto, so re-running the same day resumes automatically, including in the evening after the UTC date has already changed), `--force` (sweep even while collection is paused after a 403; prefer `gwt unblock` once you've reviewed it). Set `GWT_USER_AGENT` to override the User-Agent.
 
-Exit codes: `0` finished, `1` aborted (5 consecutive failures or a 403), `2` bad arguments, `3` another sweep is already running.
+Exit codes: `0` finished, `1` aborted (5 consecutive failures, a 403, or rate-limited), `2` bad arguments, `3` another sweep is already running, `4` collection is paused after a 403 (see [Blocked runs](#blocked-runs-403)), `130` interrupted with Ctrl-C (recorded as interrupted; re-run the same day to resume).
+
+`backup --out PATH [--db PATH] [--force]` copies the database with SQLite's backup API, so it's consistent even while a sweep is writing, then checks the copy (`PRAGMA quick_check`) and prints its row counts. It never overwrites a file unless given `--force`, and never migrates: a backup taken before an upgrade is an exact copy of the old database.
 
 ### Demo database
 
-`python -m gwt demo-db --out PATH [--weeks 60] [--seed 7] [--force]` writes clearly synthetic but realistic history: ~60 weekly full sweeps plus daily 30-day sweeps (scrape times in UTC like the collector), 27 suite codes grouped into 17 rooms, rooms declining towards arrival, Fri/Sat nights, summer and school-break / holiday nights filling earlier, prices rising with expected demand, and the cheapest suites selling out first. The full default takes ~25 s and ~290 MB. The database is marked `synthetic_demo` and the dashboard shows a banner for it.
+`python -m gwt demo-db --out PATH [--weeks 60] [--seed 7] [--force]` writes clearly synthetic but realistic history: ~60 weekly full sweeps plus daily 38-day sweeps (scrape times in UTC like the collector), 27 suite codes grouped into 17 rooms, rooms declining towards arrival, Fri/Sat nights, summer and school-break / holiday nights filling earlier, prices rising with expected demand, and the cheapest suites selling out first. The full default takes ~25 s and ~300 MB. The database is marked `synthetic_demo` and the dashboard shows a banner for it.
 
 It **never writes to the real database**: it refuses `$GWT_DB`, `data/gwl.db` and `/app/data/gwl.db`, and won't replace an existing file unless it's an earlier demo database and `--force` is given.
 
@@ -183,17 +194,80 @@ docker compose up -d --build
 docker compose logs -f                          # shows the next scheduled run times
 ```
 
-Open `http://<server>:8080`. The first scheduled sweep is the next 05:43 (30 days) or Sunday 03:17 (365 days). To start one now:
+Open `http://<server>:8080`. The first scheduled sweep is the next 05:43 (38 days) or Sunday 03:17 (365 days). To start one now:
 
 ```bash
-docker compose exec gwt python -m gwt sweep --days 30
+docker compose exec gwt python -m gwt sweep --days 38
 ```
 
 That still works while the scheduler is running: a file lock next to the database stops two sweeps from overlapping, and the second one exits with code 3.
 
-**Unraid:** this works as-is on Unraid. Map `/app/data` to appdata (e.g. `/mnt/user/appdata/great-wolf-tracker:/app/data`), make that folder writable by uid 1000, and map container port 8080. The compose file has the appdata path as a comment.
+**Stopping.** `docker compose stop` (or a rebuild) lets a running sweep stop at the next date, or wake from its wait between requests, and record itself as `interrupted`; the compose file gives it 45 s (`stop_grace_period`) before Docker would kill it. Re-running the same day resumes it.
+
+**Unraid:** keep the data folder on a pool path, not the user-share FUSE path: map `/mnt/cache/appdata/great-wolf-tracker:/app/data` (use your pool's name if it isn't `cache`), or set the `appdata` share to **Exclusive access** (Unraid 6.12+, Shares → appdata → Primary storage only), which makes `/mnt/user/appdata` a direct path to the pool. Through the plain `/mnt/user/...` FUSE path (shfs), SQLite's WAL shared memory and the sweep's file lock aren't reliable, which risks a corrupt database or two sweeps at once. If you're already on `/mnt/user/appdata/great-wolf-tracker` and the share lives on the cache pool, the files are already at `/mnt/cache/appdata/great-wolf-tracker`: stop the container, change the volume path, start it again. Make the folder writable by uid 1000 and map container port 8080.
 
 **No authentication.** The dashboard is meant for the LAN only. Don't port-forward it or put it behind a public reverse proxy without adding auth first.
+
+### Upgrading
+
+Take a backup, then rebuild. The new version migrates the database on startup (see [Data model](#data-model)); the backup is your way back if anything looks wrong.
+
+1. **Back up** (safe while the container runs):
+   ```bash
+   docker compose exec gwt python -m gwt backup --out /app/data/gwl.pre-redesign.db
+   ```
+2. **Pull and rebuild:**
+   ```bash
+   git pull && docker compose up -d --build
+   ```
+3. **Check `/healthz`:**
+   ```bash
+   curl -s http://localhost:8080/healthz
+   ```
+   Expect `"status": "ok"`, `"db_exists": true`, `"has_data": true` and `"collection_paused": null`; `docker compose logs gwt` shows `database /app/data/gwl.db: migrated`.
+4. **Run a small sweep** and check it on the Runs page:
+   ```bash
+   docker compose exec gwt python -m gwt sweep --days 3
+   ```
+
+**Upgrading from a build without `gwt backup`** (e.g. the one built from commit 84181f2): step 1 doesn't exist there, so copy the files with the container stopped instead.
+
+1. Stop the container so nothing writes to the database:
+   ```bash
+   docker compose stop
+   ```
+2. In the data folder, copy `gwl.db` together with any `gwl.db-wal` / `gwl.db-shm` next to it, keeping the set's names matched (SQLite only reads a `-wal` file named after its database):
+   ```bash
+   cd /mnt/cache/appdata/great-wolf-tracker      # your data folder
+   for s in "" -wal -shm; do [ -e "gwl.db$s" ] && cp -p "gwl.db$s" "gwl.pre-redesign.db$s"; done; ls -l gwl.*
+   ```
+   Confirm the copy opens, with `sqlite3` if the host has it:
+   ```bash
+   sqlite3 gwl.pre-redesign.db "PRAGMA quick_check; SELECT COUNT(*) FROM snapshots;"
+   ```
+   or with Docker (works on Unraid, which has no `sqlite3`):
+   ```bash
+   docker run --rm -v "$PWD":/data python:3.12-slim python -c "import sqlite3; c = sqlite3.connect('/data/gwl.pre-redesign.db'); print(c.execute('PRAGMA quick_check').fetchone()[0], c.execute('SELECT COUNT(*) FROM snapshots').fetchone()[0], 'snapshots')"
+   ```
+   It should print `ok` and the number of snapshots.
+3. Then pull, rebuild and start, and carry on with steps 3 and 4 above:
+   ```bash
+   git pull && docker compose up -d --build
+   ```
+
+To roll back, stop the container, move the `gwl.db*` files aside, copy `gwl.pre-redesign.db` back as `gwl.db` (with its `-wal`/`-shm` if any, renamed to match), and check out the previous commit before rebuilding.
+
+### Blocked runs (403)
+
+An HTTP 403 means Great Wolf may be blocking automated requests, so the sweep stops at once (Ground rules: stop and reassess, don't evade) and the run is recorded as **BLOCKED (403)**. From then on **collection is paused**: scheduled sweeps skip with a `COLLECTION PAUSED` error in the logs, a manual `gwt sweep` refuses with exit code 4, and the Plan and Runs pages show "Collection paused: blocked (403) on DATE, run `gwt unblock` after reviewing." No setting needs changing.
+
+Once you've looked into it (the run's message, the logs, the site's terms), resume with:
+
+```bash
+docker compose exec gwt python -m gwt unblock
+```
+
+`gwt sweep --force` sweeps once despite the pause (and clears it if that run completes); a new 403 pauses again.
 
 ### Configuration (environment variables)
 
@@ -201,10 +275,10 @@ That still works while the scheduler is running: a file lock next to the databas
 |---|---|---|
 | `GWT_SCHEDULE_ENABLED` | `true` | `false` = web only; sweeps only via `exec` / CLI |
 | `GWT_TZ` | `America/Toronto` | Timezone for the schedule (DST-aware) |
-| `GWT_FULL_SWEEP_CRON` | `17 3 * * 0` | Full sweep, standard 5-field crontab (0 or 7 = Sunday); `off` disables |
+| `GWT_FULL_SWEEP_CRON` | `17 3 * * 0` | Full sweep, standard 5-field crontab: day-of-week takes 0–7 (0 and 7 = Sunday), names (`mon`), ranges incl. wrap-around (`5-1` = Fri–Mon), lists and steps (`*/2` = Sun, Tue, Thu, Sat); anything else stops startup with an error. `off` disables |
 | `GWT_FULL_SWEEP_DAYS` | `365` | Days covered by the full sweep |
 | `GWT_DAILY_SWEEP_CRON` | `43 5 * * *` | Short sweep; `off` disables |
-| `GWT_DAILY_SWEEP_DAYS` | `30` | Days covered by the short sweep |
+| `GWT_DAILY_SWEEP_DAYS` | `38` | Days covered by the short sweep. 38 = 30 + 8: every night in the next 30 days then has a scrape 6–8 days earlier on any day of the week, which "sold in the last 7 days" needs |
 | `GWT_PORT` | `8080` | Web port inside the container (change the compose port mapping to match) |
 | `GWT_DB` | `/app/data/gwl.db` | SQLite path |
 | `GWT_USER_AGENT` | `great-wolf-tracker/<version> (...)` | User-Agent for API requests |
@@ -212,11 +286,13 @@ That still works while the scheduler is running: a file lock next to the databas
 | `GWT_FINAL_FILL_MAX_LEAD` | `2` | A night's final fill counts only if its closest scrape was at most this many days before arrival |
 
 Notes:
-- Both scheduled jobs use the default run ID (today's UTC date). On Sundays the daily sweep skips dates the weekly sweep has already captured.
+- Both scheduled jobs use the default run ID (today's date in Toronto). On Sundays the daily sweep skips dates the weekly sweep has already captured.
 - Jobs that are missed while the container is down still run if it comes back within an hour. Otherwise they wait for the next slot.
-- The image has a `HEALTHCHECK` against `/healthz`.
-- Check the **Runs** page after the first few sweeps. **A run marked BLOCKED (403) means stop and reassess** (see Ground rules). Set `GWT_SCHEDULE_ENABLED=false` rather than letting it retry every day.
-- The database is a single file (`data/gwl.db`, plus `-wal`/`-shm` files while running); include the data folder in backups.
+- The image has a `HEALTHCHECK` against `/healthz`, which also reports `collection_paused` and any `events_problem`.
+- Check the **Runs** page after the first few sweeps. **A run marked BLOCKED (403) pauses collection** until you run `gwt unblock` (see [Blocked runs](#blocked-runs-403)); there's no need to touch `GWT_SCHEDULE_ENABLED`. A **rate-limited** run (Retry-After over 10 minutes) simply ends; the next scheduled run carries on.
+- The database is a single file (`data/gwl.db`, plus `-wal`/`-shm` files while running). For backups use `gwt backup` (consistent while running) or copy the whole data folder with the container stopped.
+- Dependencies: `pyproject.toml` gives version ranges with upper bounds; `requirements.lock` pins the exact versions the Docker image installs (`pip check` in the build fails if they stop matching). After changing a dependency, regenerate it with the command at the top of the file (`uv pip compile ...`; pip-tools' `pip-compile` works too) and commit both.
+- `python scripts/smoke_test.py IMAGE` (needs Docker) starts a built image on a copy of `tests/fixtures/legacy-84181f2.db`, a database written by the pre-redesign build, waits for `/healthz`, requests every page and API route expecting 200, checks the migration inside the container, and stops it. CI runs it after `docker build`; it never calls Great Wolf.
 
 ## Web dashboard
 
@@ -224,15 +300,15 @@ Charts and calendars use the full window width (24 px padding, 16 px on a phone)
 
 | Page | What it shows |
 |---|---|
-| **Plan** `/` | A 12-month wall calendar (Sun–Sat, 6 months per row on a wide screen down to 1 on a phone). Each night is coloured by **Price** (default), **Rooms left** or **Pace**, with a legend in real values (quantile breaks over the 12 months shown, colourblind-safe blue ramp), distinct sold-out and no-data styles, today outlined, and a dot on no-school-next-day nights. The tooltip shows rooms left, % sold, lowest and reference rate, room types sold out, lead days, pace and school closures. Below: a price vs rooms-left (or pace) scatter with day-window and weekday filters and the cheap-and-quiet quadrant shaded, then **Cheapest upcoming nights** and **Filling fastest** lists, each with its rule stated |
+| **Plan** `/` | A wall calendar of the next 365 nights: today's month through the month of the 365th night, so 13 months with the last one partial (Sun–Sat, 6 months per row on a wide screen down to 1 on a phone). Each night is coloured by **Price** (default), **Rooms left** or **Pace**, with a legend in real values (quantile breaks over the nights shown, colourblind-safe blue ramp), distinct sold-out and no-data styles, today outlined, and a dot on no-school-next-day nights. The tooltip shows rooms left, % sold, lowest and reference rate, room types sold out, lead days, pace and school closures. Below: a price vs pace scatter (rooms left on a toggle; the note says how many nights have no pace yet) with day-window and weekday filters and the cheap-and-quiet quadrant shaded, then **Cheapest upcoming nights** and **Filling fastest** (nights that sold rooms in the last 7 days first, most sold first, then the rest by pace), each with its rule stated |
 | **Seasonality** `/seasonality` (`/trends` redirects) | "How full each week ends up": average final-fill % sold by week of the year, one line per year, Fri–Sat and Sun–Thu nights in two panels, school breaks shaded (fills in one night per day). "Forecast from current prices": average lowest rate per week for the next 52 weeks, Sun–Thu vs Fri–Sat, breaks shaded and named |
 | **Night** `/date/YYYY-MM-DD` | Tiles for rooms left (% sold), lowest rate, reference rate, room types fully sold (of ~17), days until arrival, pace, sold in the last 7 days, and school-closure tags. Then the rooms table (codes grouped into rooms, expandable into variants with accessibility, beds, baths and rates) and booking curves for rooms left and lowest rate: this night against the median and 10th–90th percentile of every other night at the same days-out |
 | **Room types** `/suites` | A room × date matrix (30/60/90/365-day window, default 90) coloured by rooms left as a share of the most that room has had, sold-out cells dark with ×, weekend columns marked: which rooms sell out first. Then every room with its codes, first/last seen and lowest rate seen |
-| Room `/rooms/{slug}` | One grouped room: rooms left and cheapest rate across upcoming nights, and its booking curve for a chosen night (`?date=`) |
+| Room `/rooms/{slug}` | One grouped room: rooms left and cheapest rate across upcoming nights, and its booking curve for a chosen night (`?date=`; a past night with data is added to the picker, a night without data falls back to the first upcoming one with a note) |
 | Suite code `/suites/{code}` | The same for a single suite code |
-| **Runs** `/runs` | Each sweep: run ID, trigger, start/end, dates fetched/skipped/failed, failed requests, status (completed / aborted / BLOCKED (403) / interrupted), and the next scheduled runs |
+| **Runs** `/runs` | Each sweep, newest first, 50 per page: run ID, trigger, start/end in Toronto time (UTC in the tooltip), dates fetched/skipped/failed, failed requests, status (completed / aborted / BLOCKED (403) / rate-limited / interrupted), and the next scheduled runs |
 
-Every chart has a "Show as a table" view, and every page shows a "No data yet" message until the first sweep has stored something.
+Every chart has a "Show as a table" view, and every page shows a "No data yet" message until the first sweep has stored something. Suite codes always appear under their current name in the `suites` table, so a suite Great Wolf renames stays one room with its whole history. Banners appear on top of the pages for synthetic demo data, for paused collection (Plan and Runs), and for an unusable `GWT_EVENTS_FILE` (every page).
 
 JSON API (for Home Assistant etc.):
 
@@ -244,8 +320,8 @@ JSON API (for Home Assistant etc.):
 | `/api/rooms`, `/api/rooms/{slug}?date=` | Grouped rooms; one room's upcoming availability and booking curve |
 | `/api/rooms/matrix?window=` | Rooms left and cheapest rate per room for the next 30/60/90/365 nights |
 | `/api/suites`, `/api/suites/{code}?date=` | Suite codes; one code's upcoming availability and booking curve |
-| `/api/runs` | Run log plus scheduler status and next run times |
-| `/healthz` | `{"status": "ok", ...}` with db / demo flag / last completed run / scheduler state |
+| `/api/runs?page=` | Run log (50 per page, with Toronto local times), whether collection is paused, scheduler status and next run times |
+| `/healthz` | `{"status": "ok", ...}` with db / demo flag / last completed run / collection paused / events-file problem / scheduler state |
 
 For example, a Home Assistant `rest` sensor on `/api/plan` with a `value_template` that picks the first entry of `cheapest_nights.nights` gives the cheapest upcoming night.
 
@@ -255,7 +331,7 @@ For example, a Home Assistant `rest` sensor on `/api/plan` with a `value_templat
 - Public pages only; no logins, no bookings, no promo-code probing.
 - Never store `pricingKey` booking tokens.
 - Review greatwolf.com terms of use before the first scheduled run.
-- If automated requests get blocked, stop and reassess rather than evade.
+- If automated requests get blocked, stop and reassess rather than evade. A 403 pauses collection automatically until `gwt unblock`.
 
 ## Roadmap
 
