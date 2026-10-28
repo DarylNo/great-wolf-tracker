@@ -27,9 +27,11 @@ def test_suite_detail_fields(sample_payload):
     s = {r.suite_code: r for r in snap.suites}["SFSSB"]
     assert s.suite_brand == "Superior Family Suite"
     assert (s.base_occupancy, s.max_occupancy, s.sort_order) == (4, 6, 1)
-    # Not present in the captured API schema -> unknown, not guessed.
-    assert s.is_accessible is None
-    assert s.num_beds is None
+    # isAccessible (bool), numOfBeds / numOfBaths (strings) -> ints.
+    assert (s.is_accessible, s.num_beds, s.num_baths) == (0, 2, 1)
+    by_code = {r.suite_code: r for r in snap.suites}
+    assert by_code["SDLXB"].is_accessible == 1
+    assert (by_code["CCTGE"].num_beds, by_code["CCTGE"].num_baths) == (5, 3)
 
 
 def test_rate_families_cheapest_per_family(sample_payload):
@@ -49,19 +51,35 @@ def test_rate_families_cheapest_per_family(sample_payload):
 
 
 @pytest.mark.parametrize(
-    "extra, accessible, beds",
+    "fields, expected",
     [
-        ({"isAccessible": True, "numberOfBeds": 2}, 1, 2),
-        ({"isAda": "false", "bedCount": "3"}, 0, 3),
-        ({"accessible": 1, "beds": [{"type": "queen"}, {"type": "bunk"}]}, 1, 2),
-        ({}, None, None),
+        ({"isAccessible": True, "numOfBeds": "3", "numOfBaths": "2"}, (1, 3, 2)),
+        ({"isAccessible": False, "numOfBeds": " 4 ", "numOfBaths": "1"}, (0, 4, 1)),
+        ({"isAccessible": False, "numOfBeds": 2, "numOfBaths": 1}, (0, 2, 1)),  # tolerate real ints
+        ({"isAccessible": None, "numOfBeds": "", "numOfBaths": "two"}, (None, None, None)),  # unparseable -> NULL
+        ({"isAccessible": "true", "numOfBeds": "1.5", "numOfBaths": None}, (None, None, None)),  # non-bool flag -> NULL
     ],
 )
-def test_accessibility_and_beds_if_api_provides_them(sample_payload, extra, accessible, beds):
-    sample_payload["suites"][0].update(extra)
+def test_accessible_beds_baths_mapping(sample_payload, fields, expected):
+    sample_payload["suites"][0].update(fields)
     s = parse_availability(sample_payload, "2026-11-18").suites[0]
-    assert s.is_accessible == accessible
-    assert s.num_beds == beds
+    assert (s.is_accessible, s.num_beds, s.num_baths) == expected
+
+
+def test_missing_accessible_beds_baths_keys_give_null(sample_payload):
+    for key in ("isAccessible", "numOfBeds", "numOfBaths"):
+        sample_payload["suites"][0].pop(key)
+    s = parse_availability(sample_payload, "2026-11-18").suites[0]
+    assert (s.is_accessible, s.num_beds, s.num_baths) == (None, None, None)
+
+
+def test_old_guessed_keys_are_ignored(sample_payload):
+    suite = sample_payload["suites"][0]
+    for key in ("isAccessible", "numOfBeds", "numOfBaths"):
+        suite.pop(key)
+    suite.update({"isAda": True, "numberOfBeds": 2, "bedCount": "3"})
+    s = parse_availability(sample_payload, "2026-11-18").suites[0]
+    assert (s.is_accessible, s.num_beds) == (None, None)
 
 
 # --------------------------------------------------------------------------- storage
@@ -71,10 +89,11 @@ def test_suite_snapshot_columns_and_rate_family_rows(conn, sample_payload):
     db.save_snapshot(conn, "r1", "2026-10-28T03:17:00+00:00", parse_availability(sample_payload, "2026-11-18"))
 
     row = conn.execute(
-        "SELECT suite_brand, base_occupancy, max_occupancy, is_accessible, num_beds "
+        "SELECT suite_brand, base_occupancy, max_occupancy, is_accessible, num_beds, num_baths "
         "FROM suite_snapshots WHERE suite_code = 'SFSSB'"
     ).fetchone()
-    assert row == ("Superior Family Suite", 4, 6, None, None)
+    assert row == ("Superior Family Suite", 4, 6, 0, 2, 1)
+    assert conn.execute("SELECT is_accessible FROM suites WHERE suite_code = 'SDLXB'").fetchone() == (1,)
 
     fams = conn.execute(
         """SELECT ss.suite_code, rf.family_title, rf.min_total_nightly_rate
@@ -121,7 +140,7 @@ def test_migrates_old_suite_snapshots_table(tmp_path):
 
     conn = db.connect(path)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(suite_snapshots)")}
-    assert {"suite_brand", "base_occupancy", "max_occupancy", "is_accessible", "num_beds"} <= cols
+    assert {"suite_brand", "base_occupancy", "max_occupancy", "is_accessible", "num_beds", "num_baths"} <= cols
     conn.close()
 
 

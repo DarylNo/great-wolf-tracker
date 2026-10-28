@@ -42,9 +42,12 @@ Each `suites[]` entry:
 | `suiteCategory` | `standard` / `themed` / `premium` / `cottage` |
 | `availableRoomCount` | int, **0 = sold out**. Primary demand signal |
 | `baseOccupancy`, `maxOccupancy`, `sortOrder` | |
+| `isAccessible` | boolean, e.g. `false`. Stored as `is_accessible` 1/0 |
+| `numOfBeds` | **string**, e.g. `"2"`. Cast to int as `num_beds`, NULL if unparseable |
+| `numOfBaths` | **string**, e.g. `"1"`. Cast to int as `num_baths`, NULL if unparseable |
 | `rateFamilies[]` | See below |
 
-No accessibility or bed-count field was observed on suites. If a raw response shows one, add its key to `ACCESSIBLE_KEYS` / `NUM_BEDS_KEYS` in `gwt/collector.py`.
+(`isAccessible`, `numOfBeds` and `numOfBaths` were confirmed from a live response after the initial capture.)
 
 Each `rateFamilies[]` entry: `title` (e.g. "Saver"), `subtitle`, `policyType`, `ratesDisplayRank`, `rates[]`.
 

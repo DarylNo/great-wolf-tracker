@@ -154,7 +154,7 @@ def date_detail(conn: sqlite3.Connection, arrival: date, today: date, window_day
     suites = _dicts(
         conn.execute(
             """SELECT ss.id, ss.suite_code, COALESCE(ss.suite_brand, ss.suite_code) AS suite_name,
-                      ss.suite_category, ss.max_occupancy, ss.is_accessible, ss.num_beds,
+                      ss.suite_category, ss.max_occupancy, ss.is_accessible, ss.num_beds, ss.num_baths,
                       ss.available_room_count, ss.min_total_nightly_rate
                FROM suite_snapshots ss
                WHERE ss.run_id = ? AND ss.arrival_date = ?

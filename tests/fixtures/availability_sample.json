@@ -8,6 +8,9 @@
       "baseOccupancy": 4,
       "maxOccupancy": 6,
       "sortOrder": 1,
+      "isAccessible": false,
+      "numOfBeds": "2",
+      "numOfBaths": "1",
       "rateFamilies": [
         {
           "title": "Saver",
@@ -59,6 +62,9 @@
       "baseOccupancy": 4,
       "maxOccupancy": 6,
       "sortOrder": 2,
+      "isAccessible": true,
+      "numOfBeds": "2",
+      "numOfBaths": "1",
       "rateFamilies": [
         {
           "title": "Saver",
@@ -90,6 +96,9 @@
       "baseOccupancy": 4,
       "maxOccupancy": 6,
       "sortOrder": 3,
+      "isAccessible": false,
+      "numOfBeds": "3",
+      "numOfBaths": "1",
       "rateFamilies": [
         {
           "title": "Saver",
@@ -153,6 +162,9 @@
       "baseOccupancy": 6,
       "maxOccupancy": 8,
       "sortOrder": 4,
+      "isAccessible": false,
+      "numOfBeds": "4",
+      "numOfBaths": "2",
       "rateFamilies": []
     },
     {
@@ -163,6 +175,9 @@
       "baseOccupancy": 8,
       "maxOccupancy": 12,
       "sortOrder": 5,
+      "isAccessible": false,
+      "numOfBeds": "5",
+      "numOfBaths": "3",
       "rateFamilies": [
         {
           "title": "Saver",

@@ -77,8 +77,9 @@ suite_snapshots(                    -- one row per suite type per arrival date p
   suite_category         TEXT,      -- standard / themed / premium / cottage
   base_occupancy         INTEGER,
   max_occupancy          INTEGER,
-  is_accessible          INTEGER,   -- 1/0, NULL until the API field is confirmed (see below)
-  num_beds               INTEGER,   -- NULL until the API field is confirmed (see below)
+  is_accessible          INTEGER,   -- isAccessible: 1/0 (NULL if missing)
+  num_beds               INTEGER,   -- numOfBeds as int (NULL if unparseable)
+  num_baths              INTEGER,   -- numOfBaths as int (NULL if unparseable)
   sort_order             INTEGER,   -- the site's display order
   available_room_count   INTEGER,   -- 0 = sold out
   min_total_nightly_rate REAL       -- cheapest rate across all families
@@ -118,7 +119,7 @@ runs(                               -- one row per sweep invocation (a resumed r
 
 A suite whose `last_seen` is older than the latest run has dropped out of the API, and a recent `first_seen` means a new suite type. Rate families live in a child table rather than a JSON column so they can be queried directly (e.g. the Saver vs Flexible spread over time).
 
-**Accessibility and bed count:** the captured availability response (see [`docs/endpoints.md`](docs/endpoints.md)) has no explicit accessibility or bed-count field on suites. The parser checks a few likely key names (`isAccessible`, `isAda`, `numberOfBeds`, `bedCount`, ...) and stores NULL when none is present. Once a real raw response confirms the right keys, update `ACCESSIBLE_KEYS` / `NUM_BEDS_KEYS` in `gwt/collector.py`. `raw_json` keeps the full response, so older snapshots can be re-parsed.
+**Accessibility, beds and baths** come straight from each suite in the API response: `isAccessible` (boolean, stored as 1/0), and `numOfBeds` / `numOfBaths` (sent as strings like `"2"`, stored as integers). A missing or unparseable value is stored as NULL. See [`docs/endpoints.md`](docs/endpoints.md).
 
 Older databases get the new `suite_snapshots` columns added automatically on connect.
 

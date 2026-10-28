@@ -41,9 +41,10 @@ CREATE TABLE IF NOT EXISTS suite_snapshots (
     suite_brand             TEXT,
     base_occupancy          INTEGER,
     max_occupancy           INTEGER,
-    is_accessible           INTEGER,            -- 1/0/NULL if the API doesn't say
-    num_beds                INTEGER,            -- NULL if the API doesn't say
-    sort_order              INTEGER
+    is_accessible           INTEGER,            -- isAccessible: 1/0, NULL if missing
+    num_beds                INTEGER,            -- numOfBeds (string in API), NULL if unparseable
+    sort_order              INTEGER,
+    num_baths               INTEGER             -- numOfBaths (string in API), NULL if unparseable
 );
 
 -- Cheapest rate per rate family (Saver, Flexible, ...) for each suite snapshot.
@@ -99,6 +100,7 @@ _ADDED_COLUMNS = {
         "is_accessible": "INTEGER",
         "num_beds": "INTEGER",
         "sort_order": "INTEGER",
+        "num_baths": "INTEGER",
     },
 }
 
@@ -214,8 +216,8 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
             cur = conn.execute(
                 """INSERT INTO suite_snapshots (run_id, scraped_at, arrival_date, suite_code,
                        suite_category, available_room_count, min_total_nightly_rate, suite_brand,
-                       base_occupancy, max_occupancy, is_accessible, num_beds, sort_order)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       base_occupancy, max_occupancy, is_accessible, num_beds, num_baths, sort_order)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id,
                     scraped_at,
@@ -229,6 +231,7 @@ def save_snapshot(conn: sqlite3.Connection, run_id: str, scraped_at: str, snap: 
                     s.max_occupancy,
                     s.is_accessible,
                     s.num_beds,
+                    s.num_baths,
                     s.sort_order,
                 ),
             )
