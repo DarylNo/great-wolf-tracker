@@ -1,0 +1,170 @@
+{
+  "suites": [
+    {
+      "suiteCode": "SFSSB",
+      "suiteBrand": "Family Suite",
+      "suiteCategory": "standard",
+      "availableRoomCount": 12,
+      "baseOccupancy": 4,
+      "maxOccupancy": 6,
+      "sortOrder": 1,
+      "rateFamilies": [
+        {
+          "title": "Saver",
+          "subtitle": "Non-refundable",
+          "policyType": "NONREF",
+          "ratesDisplayRank": 1,
+          "rates": [
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-SFSSB-SAVER.sig",
+              "rateCode": "SAVER",
+              "type": "room",
+              "rate": 379.99,
+              "totalRate": 379.99,
+              "totalNightlyRate": 379.99,
+              "taxes": 49.4,
+              "taxesAndFees": {"TAX": 49.4},
+              "advancedDeposit": 100.0,
+              "roomAdjustmentTax": 0
+            }
+          ]
+        },
+        {
+          "title": "Flexible",
+          "subtitle": "Free cancellation",
+          "policyType": "FLEX",
+          "ratesDisplayRank": 2,
+          "rates": [
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-SFSSB-FLEX.sig",
+              "rateCode": "FLEX",
+              "type": "room",
+              "rate": 419.99,
+              "totalRate": 419.99,
+              "totalNightlyRate": 419.99,
+              "taxes": 54.6,
+              "taxesAndFees": {"TAX": 54.6},
+              "advancedDeposit": 100.0,
+              "roomAdjustmentTax": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "suiteCode": "SDLXB",
+      "suiteBrand": "Deluxe Suite",
+      "suiteCategory": "standard",
+      "availableRoomCount": 0,
+      "baseOccupancy": 4,
+      "maxOccupancy": 6,
+      "sortOrder": 2,
+      "rateFamilies": [
+        {
+          "title": "Saver",
+          "subtitle": "Non-refundable",
+          "policyType": "NONREF",
+          "ratesDisplayRank": 1,
+          "rates": [
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-SDLXB.sig",
+              "rateCode": "SAVER",
+              "type": "room",
+              "rate": 299.99,
+              "totalRate": 299.99,
+              "totalNightlyRate": 299.99,
+              "taxes": 39.0,
+              "taxesAndFees": {"TAX": 39.0},
+              "advancedDeposit": 100.0,
+              "roomAdjustmentTax": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "suiteCode": "TWLFD",
+      "suiteBrand": "Wolf Den Suite",
+      "suiteCategory": "themed",
+      "availableRoomCount": 5,
+      "baseOccupancy": 4,
+      "maxOccupancy": 6,
+      "sortOrder": 3,
+      "rateFamilies": [
+        {
+          "title": "Saver",
+          "subtitle": "Non-refundable",
+          "policyType": "NONREF",
+          "ratesDisplayRank": 1,
+          "rates": [
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-TWLFD.sig",
+              "rateCode": "SAVER",
+              "type": "room",
+              "rate": 459.99,
+              "totalRate": 459.99,
+              "totalNightlyRate": 459.99,
+              "taxes": 59.8,
+              "taxesAndFees": {"TAX": 59.8},
+              "advancedDeposit": 100.0,
+              "roomAdjustmentTax": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "suiteCode": "PGRZL",
+      "suiteBrand": "Grizzly Bear Suite",
+      "suiteCategory": "premium",
+      "availableRoomCount": 0,
+      "baseOccupancy": 6,
+      "maxOccupancy": 8,
+      "sortOrder": 4,
+      "rateFamilies": []
+    },
+    {
+      "suiteCode": "CCTGE",
+      "suiteBrand": "Cottage",
+      "suiteCategory": "cottage",
+      "availableRoomCount": 2,
+      "baseOccupancy": 8,
+      "maxOccupancy": 12,
+      "sortOrder": 5,
+      "rateFamilies": [
+        {
+          "title": "Saver",
+          "subtitle": "Non-refundable",
+          "policyType": "NONREF",
+          "ratesDisplayRank": 1,
+          "rates": [
+            {
+              "pricingKey": "eyJhbGciOiJIUzI1NiJ9.FAKE-CCTGE.sig",
+              "rateCode": "SAVER",
+              "type": "room",
+              "rate": 1199.99,
+              "totalRate": 1199.99,
+              "totalNightlyRate": 1199.99,
+              "taxes": 156.0,
+              "taxesAndFees": {"TAX": 156.0},
+              "advancedDeposit": 250.0,
+              "roomAdjustmentTax": 0
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "errorCode": null,
+  "offerType": "BAR",
+  "promoDescription": null,
+  "planDescription": null,
+  "isQualifyIdRequired": false,
+  "isIdMeValidationRequired": false,
+  "pr": null,
+  "rr": null,
+  "defaultsApplied": false,
+  "defaultsReason": null,
+  "isProperty": true
+}
