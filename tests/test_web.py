@@ -645,7 +645,7 @@ def test_date_page_bands_match_a_brute_force_recompute(demo_db):
         stats = data.get_stats(conn, str(demo_db.resolve()))
         night = date(2026, 11, 21)
         detail = data.date_detail(conn, stats, night, TODAY)
-        others = [s for s in stats.snaps if s.arrival != night]
+        others = [s for s in stats.daily if s.arrival != night]
         assert detail["curve"]["rooms_band"] == data.M.band_by_bucket((s.lead, s.rooms) for s in others)
         assert detail["curve"]["rate_band"] == data.M.band_by_bucket((s.lead, s.min_rate) for s in others)
         room = data.room_detail(conn, stats, "family-suite", TODAY, night)
@@ -655,3 +655,147 @@ def test_date_page_bands_match_a_brute_force_recompute(demo_db):
         assert room["curve"]["rate_band"] == data.M.band_by_bucket((o.lead, o.min_rate) for o in rest)
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- room tiers / price moves
+
+NIGHT = TODAY + timedelta(days=3)
+
+
+def priced(payload: dict, code: str, rate: float | None = None, rooms: int | None = None) -> dict:
+    """A copy of `payload` with one suite's rates and/or rooms left changed."""
+    out = json.loads(json.dumps(payload))
+    for s in out["suites"]:
+        if s["suiteCode"] != code:
+            continue
+        if rooms is not None:
+            s["availableRoomCount"] = rooms
+        if rate is not None:
+            for fam in s.get("rateFamilies") or []:
+                for r in fam["rates"]:
+                    r["totalNightlyRate"] = r["rate"] = r["totalRate"] = rate
+                rate += 40  # keep Flexible dearer than Saver
+    return out
+
+
+@pytest.fixture
+def two_scans_db(tmp_path, sample_payload) -> Path:
+    """One night scraped twice today: morning (09:43 UTC) and afternoon (19:13 UTC), the
+    standard suite $30 cheaper in the afternoon."""
+    path = tmp_path / "two.db"
+    conn = db.connect(path)
+    db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00", parse_availability(sample_payload, NIGHT))
+    db.save_snapshot(conn, "2026-10-28-intraday", "2026-10-28T19:13:00+00:00",
+                     parse_availability(priced(sample_payload, "SFSSB", 349.99), NIGHT))
+    conn.close()
+    return path
+
+
+def test_tier_filter_prices_the_cheapest_room_of_that_tier_or_above(single_db):
+    # Sample night: standard $379.99 (12 left), themed $459.99, premium sold out, cottage $1,199.99.
+    with make_client(single_db) as c:
+        def night(tier):
+            body = c.get(f"/api/plan?tier={tier}").json()
+            return body["tier"], next(n for n in body["nights"] if n["date"] == NIGHT.isoformat())
+
+        assert night("all")[1]["min_rate"] == 379.99
+        tier, n = night("themed")
+        assert tier == "themed" and n["min_rate"] == 459.99 and n["lodge_min_rate"] == 379.99
+        assert night("premium")[1]["min_rate"] == 1199.99  # premium sold out: the cottage is next up
+        assert night("cottage")[1]["min_rate"] == 1199.99
+        assert night("bogus")[0] == "all"
+        html = c.get("/?tier=premium").text
+        assert 'data-tier="premium" class="on"' in html and "cheapest <strong>premium and up</strong> room" in html
+        assert "$1,199.99" in html and "lowest rate, premium and up" in html
+        assert 'href="/?tier=themed&amp;metric=price"' in html
+        assert "cheapest <strong>" not in c.get("/").text
+
+
+def test_tier_with_nothing_left_is_not_a_cheap_night(tmp_path, sample_payload):
+    path = tmp_path / "nocottage.db"
+    conn = db.connect(path)
+    db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00",
+                     parse_availability(priced(sample_payload, "CCTGE", rooms=0), NIGHT))
+    conn.close()
+    with make_client(path) as c:
+        body = c.get("/api/plan?tier=premium").json()
+        n = next(n for n in body["nights"] if n["date"] == NIGHT.isoformat())
+        assert n["min_rate"] is None and not n["sold_out"]  # rooms left, just none premium or better
+        assert body["cheapest_nights"]["nights"] == []
+        assert "nothing left, premium and up" in c.get("/?tier=premium").text
+
+
+def test_same_day_scans_count_once_in_distributions(two_scans_db):
+    conn = db.connect_readonly(two_scans_db)
+    try:
+        stats = data.get_stats(conn, f"two:{two_scans_db}")
+        assert len(stats.snaps) == 2 and len(stats.daily) == 1
+        assert stats.daily[0].run_id == "2026-10-28-intraday" and stats.latest[NIGHT].min_rate == 349.99
+        assert stats.pace_table.size(3) == 1
+        detail = data.date_detail(conn, stats, NIGHT, TODAY)
+        assert len(detail["curve"]["rate"]) == 1 and detail["curve"]["rate"][0]["value"] == 349.99
+    finally:
+        conn.close()
+
+
+def test_price_moves_between_the_last_two_scans(two_scans_db):
+    with make_client(two_scans_db) as c:
+        moves = c.get("/api/plan").json()["price_moves"]
+        assert "biggest drops first" in moves["rule"].lower()
+        assert len(moves["nights"]) == 1
+        m = moves["nights"][0]
+        assert m["date"] == NIGHT.isoformat() and m["kind"] == "drop"
+        assert m["prev_rate"] == 379.99 and m["rate"] == 349.99 and round(m["change"], 2) == -30.0
+        html = c.get("/").text
+        assert "Price moves since the previous scan" in html and "−$30.00" in html
+        assert "was $379.99 at the previous scan" in c.get(f"/date/{NIGHT.isoformat()}").text
+        # Themed and up didn't move, so nothing to show under that tier.
+        assert c.get("/api/plan?tier=themed").json()["price_moves"]["nights"] == []
+
+
+def test_price_moves_need_scans_within_a_day(tmp_path, sample_payload):
+    path = tmp_path / "apart.db"
+    conn = db.connect(path)
+    db.save_snapshot(conn, "2026-10-26", "2026-10-26T09:43:00+00:00", parse_availability(sample_payload, NIGHT))
+    db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00",
+                     parse_availability(priced(sample_payload, "SFSSB", 349.99), NIGHT))
+    conn.close()
+    with make_client(path) as c:
+        assert c.get("/api/plan").json()["price_moves"]["nights"] == []
+        assert "No price changes between the last two scans" in c.get("/").text
+        assert "at the previous scan" not in c.get(f"/date/{NIGHT.isoformat()}").text
+
+
+def test_price_moves_order_and_sold_out_nights(tmp_path, sample_payload):
+    """Drops (biggest first), then reopened, rises, and nights that sold out."""
+    path = tmp_path / "order.db"
+    conn = db.connect(path)
+    soldout = json.loads(json.dumps(sample_payload))
+    for s in soldout["suites"]:
+        s["availableRoomCount"] = 0
+    nights = {  # night offset: (morning payload, afternoon payload)
+        3: (sample_payload, priced(sample_payload, "SFSSB", 369.99)),   # -10
+        4: (sample_payload, priced(sample_payload, "SFSSB", 339.99)),   # -40
+        5: (soldout, sample_payload),                                    # reopened
+        6: (sample_payload, priced(sample_payload, "SFSSB", 399.99)),   # +20
+        7: (sample_payload, soldout),                                    # sold out
+        8: (sample_payload, sample_payload),                             # unchanged
+    }
+    for k, (am, _pm) in nights.items():
+        db.save_snapshot(conn, "2026-10-28", "2026-10-28T09:43:00+00:00",
+                         parse_availability(am, TODAY + timedelta(days=k)))
+    for k, (_am, pm) in nights.items():
+        db.save_snapshot(conn, "2026-10-28-intraday", "2026-10-28T19:13:00+00:00",
+                         parse_availability(pm, TODAY + timedelta(days=k)))
+    conn.close()
+    with make_client(path) as c:
+        moves = c.get("/api/plan").json()["price_moves"]["nights"]
+        assert [(m["date"], m["kind"]) for m in moves] == [
+            ((TODAY + timedelta(days=4)).isoformat(), "drop"),
+            ((TODAY + timedelta(days=3)).isoformat(), "drop"),
+            ((TODAY + timedelta(days=5)).isoformat(), "reopened"),
+            ((TODAY + timedelta(days=6)).isoformat(), "rise"),
+            ((TODAY + timedelta(days=7)).isoformat(), "sold_out"),
+        ]
+        html = c.get("/").text
+        assert "reopened" in html and "+$20.00" in html

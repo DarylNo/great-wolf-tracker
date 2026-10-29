@@ -22,7 +22,9 @@ def test_defaults():
     assert [(j.name, j.cron.expression, j.days) for j in cfg.jobs] == [
         ("weekly", "17 3 * * 0", 365),
         ("daily", "43 5 * * *", 38),
+        ("intraday", "13 15 * * *", 14),
     ]
+    assert [j.own_run for j in cfg.jobs] == [False, False, True]
 
 
 def test_env_overrides():
@@ -32,6 +34,7 @@ def test_env_overrides():
         "GWT_FULL_SWEEP_CRON": "0 2 * * 6",
         "GWT_FULL_SWEEP_DAYS": "200",
         "GWT_DAILY_SWEEP_CRON": "off",
+        "GWT_INTRADAY_SWEEP_CRON": "off",
     })
     assert cfg.enabled is False
     assert cfg.timezone == "UTC"
@@ -146,7 +149,7 @@ def test_build_scheduler(tmp_path):
     sched.start(paused=True)
     try:
         jobs = {j["id"]: j for j in describe(sched)}
-        assert set(jobs) == {"sweep-weekly", "sweep-daily"}
+        assert set(jobs) == {"sweep-weekly", "sweep-daily", "sweep-intraday"}
         for job in sched.get_jobs():
             assert job.max_instances == 1 and job.coalesce is True
     finally:
@@ -193,6 +196,26 @@ def test_scheduled_sweep_outcomes(tmp_path):
     assert run_scheduled_sweep(tmp_path / "x.db", JOB, runner=interrupted) == "interrupted"
     assert run_scheduled_sweep(tmp_path / "x.db", JOB, runner=paused) == "paused"
     assert run_scheduled_sweep(tmp_path / "x.db", JOB, runner=crash) == "error"
+
+
+def test_intraday_job_uses_a_run_id_of_its_own(tmp_path, monkeypatch):
+    """The afternoon sweep must not share the day's run ID, or it would skip every date the
+    morning sweep already captured."""
+    from gwt import scheduler as sched_mod
+
+    monkeypatch.setattr(sched_mod, "default_run_id", lambda: "2026-10-28")
+    calls = []
+
+    def runner(db_path, **kwargs):
+        calls.append(kwargs)
+        return SweepResult(run_id=kwargs.get("run_id") or "2026-10-28", fetched=14)
+
+    intraday = SweepJob(name="intraday", cron=CronSpec.parse("13 15 * * *"), days=14, own_run=True)
+    assert run_scheduled_sweep(tmp_path / "x.db", intraday, runner=runner) == "completed"
+    assert run_scheduled_sweep(tmp_path / "x.db", JOB, runner=runner) == "completed"
+    assert calls[0]["run_id"] == "2026-10-28-intraday" and calls[0]["days"] == 14
+    assert calls[0]["trigger"] == "schedule:intraday"
+    assert "run_id" not in calls[1]  # daily/weekly keep the shared default run ID
 
 
 def test_paused_scheduled_sweep_logs_loudly(tmp_path, caplog):
@@ -295,7 +318,7 @@ def test_container_stop_interrupts_a_running_scheduled_sweep(tmp_path, monkeypat
         base_url="https://prod.api.greatwolf.com", transport=httpx.MockTransport(handler)))
     path = tmp_path / "gwl.db"
     db.connect(path).close()
-    schedule = ScheduleConfig.from_env({"GWT_DAILY_SWEEP_CRON": "off"})
+    schedule = ScheduleConfig.from_env({"GWT_DAILY_SWEEP_CRON": "off", "GWT_INTRADAY_SWEEP_CRON": "off"})
     app = create_app(Settings(db_path=path, host="127.0.0.1", port=8080, schedule=schedule))
     with TestClient(app):
         app.state.scheduler.get_job("sweep-weekly").modify(next_run_time=datetime.now(TZ))

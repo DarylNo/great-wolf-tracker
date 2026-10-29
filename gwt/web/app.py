@@ -70,6 +70,7 @@ def _iso_label(value: str | None) -> str:
 PLAN_NIGHT_FIELDS = (
     "date", "weekday", "weekend", "has_data", "rooms_left", "pct_sold", "min_rate", "ref_rate", "sold_out",
     "lead_days", "scraped_on", "pace_pct", "pickup_7d", "room_types_sold_out", "room_types", "school_closure",
+    "lodge_min_rate",
 )
 
 
@@ -123,7 +124,7 @@ def create_app(
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     env = templates.env
     env.filters.update(
-        money=fmt.money, money0=fmt.money0, pct=fmt.pct, pace_rank=fmt.pace_rank, pace=fmt.pace, yesno=fmt.yesno,
+        money=fmt.money, money0=fmt.money0, money_signed=fmt.money_signed, pct=fmt.pct, pace_rank=fmt.pace_rank, pace=fmt.pace, yesno=fmt.yesno,
         signed=fmt.signed, datelong=_iso_label, localtime=data.local_time, booking_url=booking_url,
     )
     env.globals.update(
@@ -133,7 +134,7 @@ def create_app(
         price_footnote=M.PRICE_FOOTNOTE,
         ref_label=data.REF_SUITE_LABEL,
         lead_caption=data.LEAD_CAPTION,
-        plan_rules={"cheapest": data.CHEAPEST_RULE, "filling": data.FILLING_RULE},
+        plan_rules={"cheapest": data.CHEAPEST_RULE, "filling": data.FILLING_RULE, "moves": data.PRICE_MOVES_RULE},
     )
     plotly_path = plotly_js_path()
 
@@ -164,14 +165,14 @@ def create_app(
     # ------------------------------------------------------------------ HTML pages
 
     @app.get("/", response_class=HTMLResponse)
-    def plan_page(request: Request, metric: str = "price"):
+    def plan_page(request: Request, metric: str = "price", tier: str = data.DEFAULT_TIER):
         metric = metric if metric in ("price", "rooms", "pace") else "price"
         with open_db() as conn:
             if not data.has_data(conn):
                 return page(request, "plan.html", conn, has_data=False, metric=metric)
             stats = stats_for(conn)
             return page(request, "plan.html", conn, has_data=True, metric=metric,
-                        plan=data.plan(conn, stats, today_fn()), status=data.status(stats))
+                        plan=data.plan(conn, stats, today_fn(), tier), status=data.status(stats))
 
     @app.get("/seasonality", response_class=HTMLResponse)
     def seasonality_page(request: Request):
@@ -242,22 +243,25 @@ def create_app(
     # ------------------------------------------------------------------ JSON API
 
     @app.get("/api/plan")
-    def api_plan():
+    def api_plan(tier: str = data.DEFAULT_TIER):
         with open_db() as conn:
             if not data.has_data(conn):
                 return {"has_data": False, "nights": []}
             stats = stats_for(conn)
-            p = data.plan(conn, stats, today_fn())
+            p = data.plan(conn, stats, today_fn(), tier)
             return {
                 "has_data": True,
                 "start": p["start"],
                 "end": p["end"],
+                "tier": p["tier"],
+                "tiers": p["tiers"],
                 "status": data.status(stats),
                 "definitions": {"price": "min_rate: lowest available nightly rate", "pace": M.PACE_LABEL,
                                 "price_note": M.PRICE_FOOTNOTE},
                 "nights": [_api_night(n) for n in p["nights"]],
                 "cheapest_nights": {"rule": data.CHEAPEST_RULE, "nights": [_api_night(n) for n in p["cheapest"]]},
                 "filling_fastest": {"rule": data.FILLING_RULE, "nights": [_api_night(n) for n in p["filling"]]},
+                "price_moves": {"rule": data.PRICE_MOVES_RULE, "nights": p["moves"]},
             }
 
     @app.get("/api/seasonality")

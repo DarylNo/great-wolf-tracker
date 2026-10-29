@@ -23,6 +23,8 @@ services:
       GWT_FULL_SWEEP_DAYS: "365"
       GWT_DAILY_SWEEP_CRON: "43 5 * * *"   # daily 05:43 -> next 38 days ("off" to disable)
       GWT_DAILY_SWEEP_DAYS: "38"
+      GWT_INTRADAY_SWEEP_CRON: "13 15 * * *"   # daily 15:13 -> re-scrape the next 14 days ("off" to disable)
+      GWT_INTRADAY_SWEEP_DAYS: "14"
       # GWT_PORT: "8080"
       # GWT_USER_AGENT: "great-wolf-tracker/0.1 (...)"
       # GWT_EVENTS_FILE: /app/data/calendar_events.yaml   # edit school dates without a rebuild

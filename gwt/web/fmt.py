@@ -18,6 +18,13 @@ def money0(value: float | None) -> str:
     return "–" if value is None else f"${value:,.0f}"
 
 
+def money_signed(value: float | None) -> str:
+    """A price change: '−$30.00' / '+$15.00'."""
+    if value is None:
+        return "–"
+    return ("−" if value < 0 else "+") + money(abs(value))
+
+
 def compact_money(value: float | None) -> str:
     """Whole dollars without a thousands separator: fits a small calendar cell."""
     return "–" if value is None else f"${value:.0f}"

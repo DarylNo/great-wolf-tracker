@@ -24,7 +24,7 @@ from typing import Callable, Iterable
 
 from gwt import metrics as M
 from gwt.events import calendar_for_range, merge_spans
-from gwt.rooms import Variant, category_rank, group_rooms, slugify
+from gwt.rooms import CATEGORY_ORDER, Variant, category_rank, group_rooms, slugify
 from gwt.web import fmt
 
 HORIZON_DAYS = 365
@@ -47,6 +47,20 @@ CHEAPEST_RULE = (
     "Lowest available nightly rate first; ties go to the night with more rooms left. "
     "Next 12 months, sold-out nights left out."
 )
+PRICE_MOVES_WINDOW_DAYS = 38
+PRICE_MOVES_RULE = (
+    "Next 38 days: nights whose lowest rate changed between their last two scans (taken within "
+    "24 h of each other). Biggest drops first, then nights that reopened, rises, and nights that sold out."
+)
+# Plan page price filter: a tier is that room category or a pricier one
+# (gwt.rooms.CATEGORY_ORDER: standard < themed < premium < cottage).
+TIERS = {
+    "all": "Any room",
+    "themed": "Themed and up",
+    "premium": "Premium and up",
+    "cottage": "Cottages",
+}
+DEFAULT_TIER = "all"
 FILLING_RULE = (
     "Next 60 days. Nights that sold rooms in the last 7 days come first, most sold first; the rest "
     "follow by pace (vs other dates at the same days-out). Sold-out nights left out."
@@ -102,7 +116,17 @@ class Stats:
         self.provisional = M.capacity_is_provisional(self.far_dates)
         for s in snaps:
             s.pct = M.pct_sold(s.rooms, self.capacity)
-        self.pace_table = M.PaceTable((s.lead, s.pct) for s in snaps)
+        # Distributions (pace, comparison bands, curves) use one snapshot per night per Toronto
+        # day, that day's latest: the afternoon sweep re-scrapes the nearest nights, and counting
+        # both scrapes would weigh those nights twice at the same days-out.
+        day_latest: dict[tuple[date, date], Snap] = {}
+        for s in snaps:
+            day_latest[(s.arrival, s.scrape_date)] = s
+        self.daily = sorted(day_latest.values(), key=lambda s: s.id)
+        self.daily_by_date: dict[date, list[Snap]] = {}
+        for s in self.daily:
+            self.daily_by_date.setdefault(s.arrival, []).append(s)
+        self.pace_table = M.PaceTable((s.lead, s.pct) for s in self.daily)
         for s in snaps:
             s.pace = self.pace_table.pace(s.lead, s.pct)
         self.by_date: dict[date, list[Snap]] = {}
@@ -124,11 +148,11 @@ class Stats:
         return M.pickup_7d(self.by_date.get(s.arrival, []), s)
 
     def band_buckets(self, field_name: str) -> list[list[float]]:
-        """Every snapshot's `rooms` or `min_rate`, sorted per lead bucket (built once per version)."""
+        """Each night's daily `rooms` or `min_rate`, sorted per lead bucket (built once per version)."""
         with self._lock:
             cached = self._bands.get(field_name)
         if cached is None:
-            cached = M.bucket_values((s.lead, getattr(s, field_name)) for s in self.snaps)
+            cached = M.bucket_values((s.lead, getattr(s, field_name)) for s in self.daily)
             with self._lock:
                 self._bands[field_name] = cached
         return cached
@@ -416,6 +440,54 @@ def _range(fmt_one: Callable[[float], str]) -> Callable[[float, float], str]:
     return lambda lo, hi: fmt_one(lo) if fmt_one(lo) == fmt_one(hi) else f"{fmt_one(lo)}–{fmt_one(hi)}"
 
 
+# --------------------------------------------------------------------------- room tiers
+
+
+def tier_rank(tier: str) -> int:
+    return 0 if tier == DEFAULT_TIER else category_rank(tier)
+
+
+def in_tier(category: str | None, tier: str) -> bool:
+    """Rooms of an unknown category only count under "Any room"."""
+    if tier == DEFAULT_TIER:
+        return True
+    return tier_rank(tier) <= category_rank(category) < len(CATEGORY_ORDER)
+
+
+def tier_rate(rooms: dict[str, tuple[int, float | None]], cat: Catalogue, tier: str) -> float | None:
+    """Cheapest rate among rooms in `tier` that still have rooms (`rooms`: name -> (left, rate))."""
+    rates = [
+        rate for name, (left, rate) in rooms.items()
+        if left > 0 and rate is not None
+        and in_tier(cat.by_name[name].category if name in cat.by_name else None, tier)
+    ]
+    return min(rates) if rates else None
+
+
+def snapshot_tier_rates(conn: sqlite3.Connection, cat: Catalogue, snaps: list[Snap], tier: str) -> dict[int, float | None]:
+    """Snap id -> cheapest rate in `tier` for each of `snaps` (from their suite rows)."""
+    if not snaps:
+        return {}
+    keys = {(s.run_id, s.arrival.isoformat()): s.id for s in snaps}
+    runs = sorted({s.run_id for s in snaps})
+    rooms: dict[int, dict[str, list]] = {sid: {} for sid in keys.values()}
+    rows = conn.execute(
+        f"""SELECT run_id, arrival_date, suite_code, suite_brand, available_room_count, min_total_nightly_rate
+            FROM suite_snapshots WHERE arrival_date BETWEEN ? AND ? AND run_id IN ({",".join("?" * len(runs))})""",
+        [min(s.arrival for s in snaps).isoformat(), max(s.arrival for s in snaps).isoformat(), *runs],
+    )
+    for run_id, arrival, code, brand, left, rate in rows:
+        sid = keys.get((run_id, arrival))
+        if sid is None:
+            continue
+        agg = rooms[sid].setdefault(cat.room_name(code, brand), [0, None])
+        left = left or 0
+        agg[0] += left
+        if left > 0 and rate is not None and (agg[1] is None or rate < agg[1]):
+            agg[1] = rate
+    return {sid: tier_rate({n: (v[0], v[1]) for n, v in r.items()}, cat, tier) for sid, r in rooms.items()}
+
+
 # --------------------------------------------------------------------------- nights (Plan page)
 
 
@@ -447,7 +519,7 @@ def _night(stats: Stats, d: date, flags, summary: dict | None) -> dict:
     return night
 
 
-def night_tip(n: dict, today: date) -> str:
+def night_tip(n: dict, today: date, tier: str = DEFAULT_TIER) -> str:
     """Tooltip text: first line is the title, then 'value<TAB>label' lines (values lead)."""
     d = date.fromisoformat(n["date"])
     lines = [fmt.date_long(d) + (" · today" if d == today else "")]
@@ -457,7 +529,15 @@ def night_tip(n: dict, today: date) -> str:
         if n["sold_out"]:
             lines.append("Sold out\t")
         lines.append(f"{n['rooms_left']}\trooms left · {fmt.pct(n['pct_sold'])} sold (est.)")
-        lines.append(f"{fmt.money(n['min_rate'])}\tlowest rate" if n["min_rate"] is not None else "–\tno rate (sold out)")
+        if tier == DEFAULT_TIER:
+            lines.append(f"{fmt.money(n['min_rate'])}\tlowest rate" if n["min_rate"] is not None
+                         else "–\tno rate (sold out)")
+        else:
+            label = TIERS[tier].lower()
+            lines.append(f"{fmt.money(n['min_rate'])}\tlowest rate, {label}" if n["min_rate"] is not None
+                         else f"–\tnothing left, {label}")
+            if n["lodge_min_rate"] is not None:
+                lines.append(f"{fmt.money(n['lodge_min_rate'])}\tlowest rate, any room")
         if n["ref_rate"] is not None:
             lines.append(f"{fmt.money(n['ref_rate'])}\t{REF_SUITE_LABEL}")
         if n.get("room_types") is not None:
@@ -502,11 +582,64 @@ def filling_fastest(window: list[dict], limit: int = LIST_LENGTH) -> list[dict]:
     return (selling + rest)[:limit]
 
 
-def plan(conn: sqlite3.Connection, stats: Stats, today: date) -> dict:
+MOVE_ORDER = {"drop": 0, "reopened": 1, "rise": 2, "sold_out": 3}
+
+
+def price_moves(conn: sqlite3.Connection, stats: Stats, today: date, tier: str = DEFAULT_TIER,
+                limit: int = LIST_LENGTH) -> list[dict]:
+    """Upcoming nights whose lowest rate (in `tier`) changed between their last two scans,
+    when those were taken within PREVIOUS_SCAN_MAX_HOURS of each other."""
+
+    def build() -> list[dict]:
+        pairs: dict[date, tuple[Snap, Snap]] = {}
+        for d in daterange(today, today + timedelta(days=PRICE_MOVES_WINDOW_DAYS - 1)):
+            snaps = stats.by_date.get(d)
+            prev = previous_scan(snaps) if snaps else None
+            if prev is not None:
+                pairs[d] = (prev, snaps[-1])
+        both = [s for pair in pairs.values() for s in pair]
+        if tier == DEFAULT_TIER:
+            rates = {s.id: s.min_rate for s in both}
+        else:
+            rates = snapshot_tier_rates(conn, catalogue(conn, stats), both, tier)
+        out = []
+        for d, (p, s) in pairs.items():
+            was, now = rates.get(p.id), rates.get(s.id)
+            if was == now:
+                continue
+            change = now - was if was is not None and now is not None else None
+            if change is not None:
+                kind = "drop" if change < 0 else "rise"
+            else:
+                kind = "reopened" if was is None else "sold_out"
+            out.append({
+                "date": d.isoformat(), "kind": kind, "prev_rate": was, "rate": now, "change": change,
+                "prev_rooms": p.rooms, "rooms_left": s.rooms,
+                "prev_scraped_local": local_time(p.scraped_at), "scraped_local": local_time(s.scraped_at),
+            })
+        out.sort(key=lambda m: (MOVE_ORDER[m["kind"]],
+                                m["change"] if m["kind"] == "drop" else -(m["change"] or 0), m["date"]))
+        return out[:limit]
+
+    return stats.memo(("moves", today, tier), build)
+
+
+def plan(conn: sqlite3.Connection, stats: Stats, today: date, tier: str = DEFAULT_TIER) -> dict:
+    """The Plan page. With a `tier` other than "all", every price on it (calendar, scatter,
+    lists) is the cheapest room of that tier or above; rooms left and pace stay lodge-wide."""
+    tier = tier if tier in TIERS else DEFAULT_TIER
     end = today + timedelta(days=HORIZON_DAYS - 1)
     cal = calendar_for_range(today, end)
     summary = latest_room_summary(conn, stats, today, end)
     nights = [_night(stats, d, cal.night_flags(d), summary.get(d)) for d in daterange(today, end)]
+    cat = catalogue(conn, stats) if tier != DEFAULT_TIER else None
+    for n in nights:
+        if not n["has_data"]:
+            continue
+        n["lodge_min_rate"] = n["min_rate"]
+        if cat is not None:
+            info = summary.get(date.fromisoformat(n["date"]))
+            n["min_rate"] = tier_rate(info["rooms"], cat, tier) if info else None
 
     live = [n for n in nights if n["has_data"] and not n["sold_out"]]
     scales = {
@@ -517,7 +650,7 @@ def plan(conn: sqlite3.Connection, stats: Stats, today: date) -> dict:
     }
     by_date = {}
     for n in nights:
-        n["tip"] = night_tip(n, today)
+        n["tip"] = night_tip(n, today, tier)
         if n["has_data"]:
             n["steps"] = {
                 "price": scales["price"].step(n["min_rate"]),
@@ -553,6 +686,10 @@ def plan(conn: sqlite3.Connection, stats: Stats, today: date) -> dict:
     return {
         "start": today.isoformat(),
         "end": end.isoformat(),
+        "tier": tier,
+        "tier_label": TIERS[tier],
+        "tiers": [{"key": k, "label": v} for k, v in TIERS.items()],
+        "moves": price_moves(conn, stats, today, tier),
         "nights": nights,
         "months": _month_grids(today, by_date, end),
         "scales": {k: s.legend for k, s in scales.items()},
@@ -718,6 +855,25 @@ def _curve_points(snaps: Iterable, value: Callable) -> list[dict]:
     ]
 
 
+PREVIOUS_SCAN_MAX_HOURS = 24
+
+
+def _hours_between(a: str, b: str) -> float:
+    def parse(ts: str) -> datetime:
+        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+    return abs((parse(b) - parse(a)).total_seconds()) / 3600
+
+
+def previous_scan(snaps: list[Snap]) -> Snap | None:
+    """The scan before a night's latest one, if it was taken within PREVIOUS_SCAN_MAX_HOURS."""
+    if len(snaps) < 2:
+        return None
+    prev, last = snaps[-2], snaps[-1]
+    return prev if _hours_between(prev.scraped_at, last.scraped_at) <= PREVIOUS_SCAN_MAX_HOURS else None
+
+
 def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: date) -> dict | None:
     snaps = stats.by_date.get(arrival)
     if not snaps:
@@ -758,9 +914,12 @@ def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: da
             }
         )
     # Bands over every other night: the pool's sorted per-bucket lists are built once per
-    # Stats; only this night's own few values are taken out per request.
-    own_rooms = M.bucket_values((x.lead, x.rooms) for x in snaps)
-    own_rates = M.bucket_values((x.lead, x.min_rate) for x in snaps)
+    # Stats; only this night's own few values are taken out per request (from the same
+    # one-per-day set the pool holds).
+    daily = stats.daily_by_date.get(arrival, [])
+    own_rooms = M.bucket_values((x.lead, x.rooms) for x in daily)
+    own_rates = M.bucket_values((x.lead, x.min_rate) for x in daily)
+    prev = previous_scan(snaps)
     return {
         "arrival_date": arrival.isoformat(),
         "label": fmt.date_long(arrival),
@@ -771,6 +930,9 @@ def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: da
         "pct_sold": s.pct,
         "min_rate": s.min_rate,
         "ref_rate": s.ref_rate,
+        "prev_min_rate": prev.min_rate if prev else None,
+        "prev_scraped_local": local_time(prev.scraped_at) if prev else None,
+        "rate_changed": prev is not None and prev.min_rate != s.min_rate,
         "room_types_sold_out": sum(1 for g in groups if g.sold_out),
         "room_types": len(groups),
         "days_until": (arrival - today).days,
@@ -784,8 +946,8 @@ def date_detail(conn: sqlite3.Connection, stats: Stats, arrival: date, today: da
         "families": families,
         "rooms": rooms_rows,
         "curve": {
-            "rooms": _curve_points(snaps, lambda x: x.rooms),
-            "rate": _curve_points(snaps, lambda x: x.min_rate),
+            "rooms": _curve_points(daily, lambda x: x.rooms),
+            "rate": _curve_points(daily, lambda x: x.min_rate),
             "rooms_band": M.band_from_buckets(stats.band_buckets("rooms"), own_rooms),
             "rate_band": M.band_from_buckets(stats.band_buckets("min_rate"), own_rates),
         },
@@ -904,7 +1066,7 @@ class Obs:
 
 
 def code_history(conn: sqlite3.Connection, codes: list[str]) -> list[Obs]:
-    """One observation per snapshot for a set of codes: rooms summed, cheapest rate among codes with rooms."""
+    """One observation per night per day for a set of codes: rooms summed, cheapest rate among codes with rooms."""
     if not codes:
         return []
     marks = ",".join("?" * len(codes))
@@ -922,13 +1084,17 @@ def code_history(conn: sqlite3.Connection, codes: list[str]) -> list[Obs]:
         if scraped_at < a[0]:
             a[0] = scraped_at
     parsed: dict[str, date] = {}
-    out = []
+    obs = []
     for (_run, arrival), (scraped_at, rooms, rate) in agg.items():
         d = parsed.get(arrival) or parsed.setdefault(arrival, date.fromisoformat(arrival))
         sd = M.scrape_local_date(scraped_at)
-        out.append(Obs(d, scraped_at, sd, (d - sd).days, rooms, rate))
-    out.sort(key=lambda o: o.scraped_at)
-    return out
+        obs.append(Obs(d, scraped_at, sd, (d - sd).days, rooms, rate))
+    obs.sort(key=lambda o: o.scraped_at)
+    # One observation per night per Toronto day (the latest), like Stats.daily.
+    day_latest: dict[tuple[date, date], Obs] = {}
+    for o in obs:
+        day_latest[(o.arrival, o.scrape_date)] = o
+    return sorted(day_latest.values(), key=lambda o: o.scraped_at)
 
 
 def _history_detail(history: list[Obs], bands: dict[str, list[list[float]]], today: date,
