@@ -116,19 +116,18 @@ Click a night for its room types and booking curve.</p>
     <p class="rule">{{ plan_rules.cheapest }}{% if plan.tier != 'all' %} Rates: {{ plan.tier_label | lower }}.{% endif %}</p>
     <div class="tablewrap limit-sm">
       <table class="data">
-        <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">% sold</th><th></th><th></th></tr></thead>
+        <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">% sold</th><th></th></tr></thead>
         <tbody>
           {% for n in plan.cheapest %}
           <tr>
-            <td><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a></td>
+            <td class="nowrap"><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a> <a class="booklink" href="{{ n.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ n.date | datelong }} on greatwolf.com">Book ↗</a></td>
             <td class="num">{{ n.min_rate | money }}</td>
             <td class="num">{{ n.rooms_left }}</td>
             <td class="num">{{ n.pct_sold | pct }}</td>
             <td>{% if n.closure %}<span class="tag"><span class="dot" aria-hidden="true"></span>No school next day</span>{% endif %}</td>
-            <td><a href="{{ n.date | booking_url }}" target="_blank" rel="noopener">Book ↗</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="6" class="sub">No priced nights yet.</td></tr>
+          <tr><td colspan="5" class="sub">No priced nights yet.</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -139,19 +138,18 @@ Click a night for its room types and booking curve.</p>
     <p class="rule">{{ plan_rules.filling }}</p>
     <div class="tablewrap limit-sm">
       <table class="data">
-        <thead><tr><th>Night</th><th class="num">Sold last 7 days</th><th class="num">Pace</th><th class="num">Rooms left</th><th class="num">Lowest rate</th><th></th></tr></thead>
+        <thead><tr><th>Night</th><th class="num">Sold last 7 days</th><th class="num">Pace</th><th class="num">Rooms left</th><th class="num">Lowest rate</th></tr></thead>
         <tbody>
           {% for n in plan.filling %}
           <tr>
-            <td><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a></td>
+            <td class="nowrap"><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a> <a class="booklink" href="{{ n.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ n.date | datelong }} on greatwolf.com">Book ↗</a></td>
             <td class="num">{{ (n.pickup_7d | signed) ~ ' rooms' if n.pickup_7d is not none else 'n/a' }}</td>
             <td class="num">{{ n.pace_pct | pace_rank }}</td>
             <td class="num">{{ n.rooms_left }}</td>
             <td class="num">{{ n.min_rate | money }}</td>
-            <td><a href="{{ n.date | booking_url }}" target="_blank" rel="noopener">Book ↗</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="6" class="sub">Needs a scrape 6–8 days earlier, or 20+ snapshots at the same days-out for pace.</td></tr>
+          <tr><td colspan="5" class="sub">Needs a scrape 6–8 days earlier, or 20+ snapshots at the same days-out for pace.</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -164,20 +162,19 @@ Click a night for its room types and booking curve.</p>
   <p class="rule">{{ plan_rules.moves }}{% if plan.tier != 'all' %} Rates: {{ plan.tier_label | lower }}.{% endif %}</p>
   <div class="tablewrap limit-sm">
     <table class="data">
-      <thead><tr><th>Night</th><th class="num">Was</th><th class="num">Now</th><th class="num">Change</th><th class="num">Rooms left</th><th>Scans</th><th></th></tr></thead>
+      <thead><tr><th>Night</th><th class="num">Was</th><th class="num">Now</th><th class="num">Change</th><th class="num">Rooms left</th><th>Scans</th></tr></thead>
       <tbody>
         {% for m in plan.moves %}
         <tr class="move {{ m.kind }}">
-          <td><a href="/date/{{ m.date }}">{{ m.date | datelong }}</a></td>
+          <td class="nowrap"><a href="/date/{{ m.date }}">{{ m.date | datelong }}</a>{% if m.rate is not none %} <a class="booklink" href="{{ m.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ m.date | datelong }} on greatwolf.com">Book ↗</a>{% endif %}</td>
           <td class="num">{{ m.prev_rate | money if m.prev_rate is not none else 'Sold out' }}</td>
           <td class="num">{{ m.rate | money if m.rate is not none else 'Sold out' }}</td>
           <td class="num">{% if m.change is not none %}{{ m.change | money_signed }}{% elif m.kind == 'reopened' %}reopened{% else %}sold out{% endif %}</td>
           <td class="num">{{ m.prev_rooms }} → {{ m.rooms_left }}</td>
           <td class="sub">{{ m.prev_scraped_local }} → {{ m.scraped_local }}</td>
-          <td>{% if m.rate is not none %}<a href="{{ m.date | booking_url }}" target="_blank" rel="noopener">Book ↗</a>{% endif %}</td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="sub">No price changes between the last two scans of any night. Nights get a second scan a day from the afternoon sweep (next 14 nights) and the next morning's sweep.</td></tr>
+        <tr><td colspan="6" class="sub">No price changes between the last two scans of any night. Nights get a second scan a day from the afternoon sweep (next 14 nights) and the next morning's sweep.</td></tr>
         {% endfor %}
       </tbody>
     </table>
