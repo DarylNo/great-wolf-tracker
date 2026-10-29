@@ -120,11 +120,11 @@ Click a night for its room types and booking curve.</p>
         <tbody>
           {% for n in plan.cheapest %}
           <tr>
-            <td class="nowrap"><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a> <a class="booklink" href="{{ n.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ n.date | datelong }} on greatwolf.com">Book ↗</a></td>
+            <td><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a> <a class="booklink" href="{{ n.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ n.date | datelong }} on greatwolf.com">Book ↗</a></td>
             <td class="num">{{ n.min_rate | money }}</td>
             <td class="num">{{ n.rooms_left }}</td>
             <td class="num">{{ n.pct_sold | pct }}</td>
-            <td>{% if n.closure %}<span class="tag"><span class="dot" aria-hidden="true"></span>No school next day</span>{% endif %}</td>
+            <td class="wrap">{% if n.closure %}<span class="tag"><span class="dot" aria-hidden="true"></span>No school next day</span>{% endif %}</td>
           </tr>
           {% else %}
           <tr><td colspan="5" class="sub">No priced nights yet.</td></tr>
@@ -142,7 +142,7 @@ Click a night for its room types and booking curve.</p>
         <tbody>
           {% for n in plan.filling %}
           <tr>
-            <td class="nowrap"><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a> <a class="booklink" href="{{ n.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ n.date | datelong }} on greatwolf.com">Book ↗</a></td>
+            <td><a href="/date/{{ n.date }}">{{ n.date | datelong }}</a> <a class="booklink" href="{{ n.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ n.date | datelong }} on greatwolf.com">Book ↗</a></td>
             <td class="num">{{ (n.pickup_7d | signed) ~ ' rooms' if n.pickup_7d is not none else 'n/a' }}</td>
             <td class="num">{{ n.pace_pct | pace_rank }}</td>
             <td class="num">{{ n.rooms_left }}</td>
