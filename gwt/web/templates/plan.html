@@ -166,7 +166,7 @@ Click a night for its room types and booking curve.</p>
       <tbody>
         {% for m in plan.moves %}
         <tr class="move {{ m.kind }}">
-          <td class="nowrap"><a href="/date/{{ m.date }}">{{ m.date | datelong }}</a>{% if m.rate is not none %} <a class="booklink" href="{{ m.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ m.date | datelong }} on greatwolf.com">Book ↗</a>{% endif %}</td>
+          <td><a href="/date/{{ m.date }}">{{ m.date | datelong }}</a>{% if m.rate is not none %} <a class="booklink" href="{{ m.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ m.date | datelong }} on greatwolf.com">Book ↗</a>{% endif %}</td>
           <td class="num">{{ m.prev_rate | money if m.prev_rate is not none else 'Sold out' }}</td>
           <td class="num">{{ m.rate | money if m.rate is not none else 'Sold out' }}</td>
           <td class="num">{% if m.change is not none %}{{ m.change | money_signed }}{% elif m.kind == 'reopened' %}reopened{% else %}sold out{% endif %}</td>
