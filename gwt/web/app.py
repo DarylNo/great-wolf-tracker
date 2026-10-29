@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
 
 from gwt import __version__, db, events
+from gwt.collector import booking_url
 from gwt import metrics as M
 from gwt.config import Settings
 from gwt.scheduler import build_scheduler, describe
@@ -123,7 +124,7 @@ def create_app(
     env = templates.env
     env.filters.update(
         money=fmt.money, money0=fmt.money0, pct=fmt.pct, pace_rank=fmt.pace_rank, pace=fmt.pace, yesno=fmt.yesno,
-        signed=fmt.signed, datelong=_iso_label, localtime=data.local_time,
+        signed=fmt.signed, datelong=_iso_label, localtime=data.local_time, booking_url=booking_url,
     )
     env.globals.update(
         version=__version__,

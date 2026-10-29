@@ -111,7 +111,7 @@ Click a night for its room types and booking curve.</p>
     <p class="rule">{{ plan_rules.cheapest }}</p>
     <div class="tablewrap limit-sm">
       <table class="data">
-        <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">% sold</th><th></th></tr></thead>
+        <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">% sold</th><th></th><th></th></tr></thead>
         <tbody>
           {% for n in plan.cheapest %}
           <tr>
@@ -120,9 +120,10 @@ Click a night for its room types and booking curve.</p>
             <td class="num">{{ n.rooms_left }}</td>
             <td class="num">{{ n.pct_sold | pct }}</td>
             <td>{% if n.closure %}<span class="tag"><span class="dot" aria-hidden="true"></span>No school next day</span>{% endif %}</td>
+            <td><a href="{{ n.date | booking_url }}" target="_blank" rel="noopener">Book ↗</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="5" class="sub">No priced nights yet.</td></tr>
+          <tr><td colspan="6" class="sub">No priced nights yet.</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -133,7 +134,7 @@ Click a night for its room types and booking curve.</p>
     <p class="rule">{{ plan_rules.filling }}</p>
     <div class="tablewrap limit-sm">
       <table class="data">
-        <thead><tr><th>Night</th><th class="num">Sold last 7 days</th><th class="num">Pace</th><th class="num">Rooms left</th><th class="num">Lowest rate</th></tr></thead>
+        <thead><tr><th>Night</th><th class="num">Sold last 7 days</th><th class="num">Pace</th><th class="num">Rooms left</th><th class="num">Lowest rate</th><th></th></tr></thead>
         <tbody>
           {% for n in plan.filling %}
           <tr>
@@ -142,9 +143,10 @@ Click a night for its room types and booking curve.</p>
             <td class="num">{{ n.pace_pct | pace_rank }}</td>
             <td class="num">{{ n.rooms_left }}</td>
             <td class="num">{{ n.min_rate | money }}</td>
+            <td><a href="{{ n.date | booking_url }}" target="_blank" rel="noopener">Book ↗</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="5" class="sub">Needs a scrape 6–8 days earlier, or 20+ snapshots at the same days-out for pace.</td></tr>
+          <tr><td colspan="6" class="sub">Needs a scrape 6–8 days earlier, or 20+ snapshots at the same days-out for pace.</td></tr>
           {% endfor %}
         </tbody>
       </table>
