@@ -116,6 +116,7 @@ p, .prose { max-width: 75ch; }
 .caveat { color: var(--ink-2); font-size: 0.9rem; }
 .book { margin: 0 0 8px; font-weight: 600; }
 .book .sub { font-weight: 400; font-size: 0.85rem; }
+tr.move.drop td:nth-child(4), tr.move.reopened td:nth-child(4) { font-weight: 600; }
 .booklink { font-size: 0.8rem; margin-left: 4px; }
 table.data td.wrap { white-space: normal; min-width: 7em; }
 .sub { color: var(--muted); }

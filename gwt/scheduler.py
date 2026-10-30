@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from gwt.config import ScheduleConfig, SweepJob
 from gwt.locking import SweepBusy
-from gwt.sweep import SweepAborted, SweepInterrupted, SweepPaused, execute_sweep
+from gwt.sweep import SweepAborted, SweepInterrupted, SweepPaused, default_run_id, execute_sweep
 
 log = logging.getLogger("gwt.scheduler")
 
@@ -34,7 +34,8 @@ def run_scheduled_sweep(
         log.warning("%s sweep skipped: another sweep is running in this process", job.name)
         return "busy"
     try:
-        result = runner(db_path, days=job.days, trigger=f"schedule:{job.name}", stop=stop)
+        extra = {"run_id": f"{default_run_id()}-{job.name}"} if job.own_run else {}
+        result = runner(db_path, days=job.days, trigger=f"schedule:{job.name}", stop=stop, **extra)
         log.info("%s sweep done: fetched=%d skipped=%d", job.name, result.fetched, result.skipped)
         return "completed"
     except SweepPaused as exc:

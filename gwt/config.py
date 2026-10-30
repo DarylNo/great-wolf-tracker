@@ -15,6 +15,11 @@ DEFAULT_DAILY_CRON = "43 5 * * *"  # daily 05:43
 # (pickup_7d, "sold in the last 7 days") on every day of the week, not only right after
 # the weekly sweep.
 DEFAULT_DAILY_DAYS = 38
+# A second, short sweep in the afternoon: catches same-day price moves on the nights closest
+# to arrival. It has its own run ID (YYYY-MM-DD-intraday), so it re-scrapes nights the morning
+# sweep already captured instead of skipping them.
+DEFAULT_INTRADAY_CRON = "13 15 * * *"  # daily 15:13
+DEFAULT_INTRADAY_DAYS = 14
 DEFAULT_TZ = "America/Toronto"
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -145,9 +150,12 @@ class CronSpec:
 
 @dataclass(frozen=True)
 class SweepJob:
-    name: str  # "weekly" / "daily"
+    name: str  # "weekly" / "daily" / "intraday"
     cron: CronSpec
     days: int
+    # False: the day's shared run ID (weekly and daily skip each other's dates).
+    # True: a run ID of its own, "<today>-<name>", so dates already scraped today are fetched again.
+    own_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,9 +175,11 @@ class ScheduleConfig:
             raise ConfigError(f"unknown timezone {tz!r}") from exc
 
         jobs = []
-        for name, cron_var, cron_default, days_var, days_default in (
-            ("weekly", "GWT_FULL_SWEEP_CRON", DEFAULT_FULL_CRON, "GWT_FULL_SWEEP_DAYS", 365),
-            ("daily", "GWT_DAILY_SWEEP_CRON", DEFAULT_DAILY_CRON, "GWT_DAILY_SWEEP_DAYS", DEFAULT_DAILY_DAYS),
+        for name, cron_var, cron_default, days_var, days_default, own_run in (
+            ("weekly", "GWT_FULL_SWEEP_CRON", DEFAULT_FULL_CRON, "GWT_FULL_SWEEP_DAYS", 365, False),
+            ("daily", "GWT_DAILY_SWEEP_CRON", DEFAULT_DAILY_CRON, "GWT_DAILY_SWEEP_DAYS", DEFAULT_DAILY_DAYS, False),
+            ("intraday", "GWT_INTRADAY_SWEEP_CRON", DEFAULT_INTRADAY_CRON, "GWT_INTRADAY_SWEEP_DAYS",
+             DEFAULT_INTRADAY_DAYS, True),
         ):
             raw = env.get(cron_var)
             expr = cron_default if raw is None else raw.strip()
@@ -180,6 +190,7 @@ class ScheduleConfig:
                     name=name,
                     cron=CronSpec.parse(expr),
                     days=parse_positive_int(env.get(days_var), days_default, days_var),
+                    own_run=own_run,
                 )
             )
         return cls(enabled=enabled, timezone=tz, jobs=tuple(jobs))

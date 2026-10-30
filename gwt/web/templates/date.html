@@ -21,7 +21,7 @@
     <div class="v">{{ 'Sold out' if d.sold_out else d.rooms_left }}</div>
     <div class="s">{{ d.pct_sold | pct }} sold (est.)</div></div>
   <div class="tile"><div class="k">Lowest rate</div>
-    <div class="v">{{ d.min_rate | money }}</div><div class="s">per night, no offer code</div></div>
+    <div class="v">{{ d.min_rate | money }}</div><div class="s">{% if d.rate_changed %}was {{ d.prev_min_rate | money if d.prev_min_rate is not none else 'sold out' }} at the previous scan ({{ d.prev_scraped_local }}){% else %}per night, no offer code{% endif %}</div></div>
   <div class="tile"><div class="k">Reference rate</div>
     <div class="v">{{ d.ref_rate | money }}</div><div class="s">{{ ref_label }}</div></div>
   <div class="tile"><div class="k">Room types fully sold</div>

@@ -10,8 +10,8 @@ Definitions (also in the README, "Metrics"):
 - ``pct_sold_est``: ``1 - rooms_left / capacity_est``.
 - Lead buckets: 0–1, 2–3, 4–7, 8–14, 15–30, 31–60, 61–90, 91–180, 181–365 days.
 - ``pace_pct``: percentile rank (0–100) of a snapshot's ``pct_sold_est`` among all snapshots
-  in the same lead bucket, i.e. "vs other dates at the same days-out". ``None`` (n/a) when
-  the bucket holds fewer than 20 snapshots.
+  in the same lead bucket (one per night per Toronto day, its latest), i.e. "vs other dates at
+  the same days-out". ``None`` (n/a) when the bucket holds fewer than 20 snapshots.
 - ``final_fill``: for one arrival date, the snapshot with the smallest ``lead_days``, valid only
   if that lead is <= 2 days (configurable). "How full it actually got."
 - ``pickup_7d``: rooms_left at the scrape ~7 days earlier minus rooms_left now (rooms sold in

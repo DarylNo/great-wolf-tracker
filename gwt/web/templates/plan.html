@@ -25,10 +25,15 @@ Click a night for its room types and booking curve.</p>
     <div class="seg" role="group" aria-labelledby="colour-by">
       <label for="m-price">Price</label><label for="m-rooms">Rooms left</label><label for="m-pace">Pace</label>
     </div>
+    <span class="label" id="price-of">Prices for</span>
+    <div class="seg" role="group" aria-labelledby="price-of">
+      {% for t in plan.tiers %}<a href="/?tier={{ t.key }}&amp;metric={{ metric }}" data-tier="{{ t.key }}"{% if t.key == plan.tier %} class="on" aria-current="true"{% endif %}>{{ t.label }}</a>{% endfor %}
+    </div>
   </div>
+  {% if plan.tier != 'all' %}<p class="note">Prices on this page are the cheapest <strong>{{ plan.tier_label | lower }}</strong> room still available each night (room categories: standard, themed, premium, cottage). Rooms left and pace are for the whole lodge.</p>{% endif %}
   <p class="note">{{ lead_caption }}</p>
   <div class="legend">
-    <span class="ramp lg-price"><span class="end">Lowest rate: cheaper</span>
+    <span class="ramp lg-price"><span class="end">Lowest rate{% if plan.tier != 'all' %} ({{ plan.tier_label | lower }}){% endif %}: cheaper</span>
       {% for b in plan.scales.price %}<span class="sw s{{ b.step }}">{{ b.label }}</span>{% endfor %}
       <span class="end">pricier</span></span>
     <span class="ramp lg-rooms"><span class="end">Rooms left: more</span>
@@ -75,7 +80,7 @@ Click a night for its room types and booking curve.</p>
 </section>
 
 <h2>Price against availability</h2>
-<p class="lede">One dot per upcoming night: the lowest nightly rate against pace (how fast it's selling {{ pace_label }}), or rooms left. Diamonds are nights with no school the next morning.</p>
+<p class="lede">One dot per upcoming night: the lowest nightly rate{% if plan.tier != 'all' %} ({{ plan.tier_label | lower }}){% endif %} against pace (how fast it's selling {{ pace_label }}), or rooms left. Diamonds are nights with no school the next morning.</p>
 <div id="scatter-block">
   <div class="toolbar">
     <span class="label">Y axis</span>
@@ -108,7 +113,7 @@ Click a night for its room types and booking curve.</p>
 <div class="grid2">
   <section>
     <h2>Cheapest upcoming nights</h2>
-    <p class="rule">{{ plan_rules.cheapest }}</p>
+    <p class="rule">{{ plan_rules.cheapest }}{% if plan.tier != 'all' %} Rates: {{ plan.tier_label | lower }}.{% endif %}</p>
     <div class="tablewrap limit-sm">
       <table class="data">
         <thead><tr><th>Night</th><th class="num">Lowest rate</th><th class="num">Rooms left</th><th class="num">% sold</th><th></th></tr></thead>
@@ -151,6 +156,30 @@ Click a night for its room types and booking curve.</p>
     </div>
   </section>
 </div>
+
+<section>
+  <h2>Price moves since the previous scan</h2>
+  <p class="rule">{{ plan_rules.moves }}{% if plan.tier != 'all' %} Rates: {{ plan.tier_label | lower }}.{% endif %}</p>
+  <div class="tablewrap limit-sm">
+    <table class="data">
+      <thead><tr><th>Night</th><th class="num">Was</th><th class="num">Now</th><th class="num">Change</th><th class="num">Rooms left</th><th>Scans</th></tr></thead>
+      <tbody>
+        {% for m in plan.moves %}
+        <tr class="move {{ m.kind }}">
+          <td><a href="/date/{{ m.date }}">{{ m.date | datelong }}</a>{% if m.rate is not none %} <a class="booklink" href="{{ m.date | booking_url }}" target="_blank" rel="noopener" aria-label="Book {{ m.date | datelong }} on greatwolf.com">Book ↗</a>{% endif %}</td>
+          <td class="num">{{ m.prev_rate | money if m.prev_rate is not none else 'Sold out' }}</td>
+          <td class="num">{{ m.rate | money if m.rate is not none else 'Sold out' }}</td>
+          <td class="num">{% if m.change is not none %}{{ m.change | money_signed }}{% elif m.kind == 'reopened' %}reopened{% else %}sold out{% endif %}</td>
+          <td class="num">{{ m.prev_rooms }} → {{ m.rooms_left }}</td>
+          <td class="sub">{{ m.prev_scraped_local }} → {{ m.scraped_local }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="sub">No price changes between the last two scans of any night. Nights get a second scan a day from the afternoon sweep (next 14 nights) and the next morning's sweep.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 
 <p class="note">
   Pace is the percentile of % sold {{ pace_label }} (n/a until 20 snapshots exist at that days-out).

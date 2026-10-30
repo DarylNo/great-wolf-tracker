@@ -431,6 +431,11 @@
       const url = new URL(window.location.href);
       url.searchParams.set("metric", e.target.value);
       window.history.replaceState(null, "", url);
+      document.querySelectorAll("a[data-tier]").forEach((a) => {  // switching tier keeps the metric
+        const link = new URL(a.href, window.location.href);
+        link.searchParams.set("metric", e.target.value);
+        a.href = link.pathname + link.search;
+      });
     }
   });
 

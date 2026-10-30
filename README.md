@@ -28,7 +28,7 @@ Optional enrichment (later):
 2. **Storage** (`gwt/db.py`): SQLite (`data/gwl.db`). Each run appends rows; nothing is overwritten, so we can see how a date's inventory and price move as it approaches (booking-curve data).
 3. **Sweep** (`python -m gwt sweep --days 365`): single-threaded with a jittered 3–5 s delay between requests, starting from today's date in Toronto. It backs off exponentially on 429/5xx and honours `Retry-After` up to 10 minutes (a longer one ends the run as **rate-limited** rather than holding the sweep open), aborts after 5 consecutive failures, and stops immediately on 403, which also **pauses collection** until you run `gwt unblock` (see [Blocked runs](#blocked-runs-403)). It is resumable: re-running with the same run ID skips dates already captured.
    Every invocation is logged to a `runs` table (counts, failures, aborted / blocked / rate-limited / interrupted).
-4. **Scheduler** (`gwt/scheduler.py`): APScheduler runs inside the container next to the web server. By default it does a full 365-day sweep on Sundays at 03:17 and a 38-day sweep daily at 05:43 (America/Toronto). A file lock means two sweeps never overlap, including one started by hand with `docker compose exec`. When the container stops, a running sweep stops between dates, records itself as interrupted, and the container exits cleanly.
+4. **Scheduler** (`gwt/scheduler.py`): APScheduler runs inside the container next to the web server. By default it does a full 365-day sweep on Sundays at 03:17, a 38-day sweep daily at 05:43, and a short 14-day **intraday** sweep daily at 15:13 that re-scrapes the nearest nights to catch same-day price moves (America/Toronto). A file lock means two sweeps never overlap, including one started by hand with `docker compose exec`. When the container stops, a running sweep stops between dates, records itself as interrupted, and the container exits cleanly.
 5. **Metrics** (`gwt/metrics.py`): every number on the dashboard is defined there, with real units (see below).
 6. **School closures** (`gwt/events.py`, `gwt/calendar_events.yaml`): marks the nights families can stay without missing school.
 7. **Web dashboard** (`gwt/web/`): FastAPI with server-rendered Jinja templates. Charts use Plotly.js served locally from the `plotly` pip package, so it works offline on the LAN and needs no frontend build. It reads the database read-only and also serves a JSON API under `/api/...`. See [Web dashboard](#web-dashboard).
@@ -43,10 +43,13 @@ There is deliberately no composite "demand index". An earlier weighted index mis
 | `capacity_est` | The largest `total_rooms_available` ever seen: a proxy for sellable inventory. Until ~60 arrival dates have been seen at `lead_days ≥ 90`, the dashboard adds the caveat "capacity estimate improves after the first full sweep" |
 | `pct_sold_est` | `1 − rooms_left / capacity_est` |
 | Lead buckets | 0–1, 2–3, 4–7, 8–14, 15–30, 31–60, 61–90, 91–180, 181–365 days |
-| `pace_pct` | Percentile rank (0–100) of a snapshot's `pct_sold_est` among **all snapshots in the same lead bucket**, labelled "vs other dates at the same days-out". n/a while that bucket has fewer than 20 snapshots |
+| `pace_pct` | Percentile rank (0–100) of a snapshot's `pct_sold_est` among **all daily snapshots in the same lead bucket**, labelled "vs other dates at the same days-out". n/a while that bucket has fewer than 20 snapshots |
 | `final_fill` | For one arrival date, the snapshot with the smallest `lead_days`, valid only if that lead is ≤ 2 days (`GWT_FINAL_FILL_MAX_LEAD`): "how full it actually got" |
 | `pickup_7d` | `rooms_left` at the scrape about 7 days earlier minus `rooms_left` now (rooms sold in the last week). n/a without a scrape 6–8 days earlier; the closest to 7 days counts |
-| Price | `min_rate`, the lowest available nightly rate. The reference suite rate (Family Suite, `SFSSB`) is shown as secondary information |
+| Price | `min_rate`, the lowest available nightly rate. The reference suite rate (Family Suite, `SFSSB`) is shown as secondary information. With a room tier picked on the Plan page, the cheapest rate among rooms of that category or above |
+| Price move | A night's lowest rate at its latest scan minus the scan before, when the two are at most 24 h apart |
+
+**One snapshot per night per day.** The intraday sweep scrapes the nearest nights twice a day. Pace, the comparison bands and the booking curves use only each night's **latest scrape of each Toronto day**, so those nights aren't counted twice at the same days-out. Every scrape is still stored, the "latest" figures everywhere are the most recent scrape, and price moves compare the last two scrapes whatever day they fall on.
 
 **Read rooms left together with lead time.** Far-out dates haven't been booked yet, so a high rooms-left count a year out mostly reflects how far away the date is. That's why the calendar defaults to price, which reflects Great Wolf's own demand forecast (its booking site reports to Duetto, a hotel dynamic-pricing system), and why pace compares a date only with other dates at the same days-out.
 
@@ -108,7 +111,7 @@ suites(                             -- lookup: one row per suite code ever seen,
 
 runs(                               -- one row per sweep invocation (a resumed run_id gets a new row)
   run_id                 TEXT,
-  trigger                TEXT,      -- cli / schedule:weekly / schedule:daily
+  trigger                TEXT,      -- cli / schedule:weekly / schedule:daily / schedule:intraday
   started_at, finished_at TEXT,
   start_date             TEXT,      -- first arrival date requested
   days                   INTEGER,
@@ -129,7 +132,7 @@ meta(key TEXT PRIMARY KEY, value TEXT)  -- facts about the database: synthetic_d
 
 **Upgrades migrate the database automatically**, in one transaction (all of it applies or none of it does): new tables, columns and indexes, then backfills (the `suites` max/min columns) that only touch rows still empty, so an interrupted upgrade is simply finished on the next start. The web server migrates before it serves its first request, waiting up to 10 s for a running sweep's lock; every CLI command migrates on connect too. Back up first anyway: see [Upgrading](#upgrading).
 
-**Size.** With the default schedule the database grows by roughly 350 MB a year (about 31,000 arrival-date snapshots, each with ~27 suite rows, their rate families and indexes). `raw_json` is stored zlib-compressed, about 2 KB instead of 17 KB per snapshot, which saves ~450 MB a year; rows written by older builds stay as plain text and are read the same way.
+**Size.** With the default schedule the database grows by roughly 410 MB a year (about 36,000 arrival-date snapshots, ~5,000 of them from the intraday sweep; each with ~27 suite rows, their rate families and indexes). `raw_json` is stored zlib-compressed, about 2 KB instead of 17 KB per snapshot, which saves ~450 MB a year; rows written by older builds stay as plain text and are read the same way.
 
 ## School closures
 
@@ -194,7 +197,7 @@ docker compose up -d --build
 docker compose logs -f                          # shows the next scheduled run times
 ```
 
-Open `http://<server>:8080` (or whichever host port you mapped). The first scheduled sweep is the next 05:43 (38 days) or Sunday 03:17 (365 days). To start one now:
+Open `http://<server>:8080` (or whichever host port you mapped). The first scheduled sweep is the next 05:43 (38 days), 15:13 (14 days) or Sunday 03:17 (365 days). To start one now:
 
 ```bash
 docker compose exec gwt python -m gwt sweep --days 38
@@ -279,6 +282,8 @@ docker compose exec gwt python -m gwt unblock
 | `GWT_FULL_SWEEP_DAYS` | `365` | Days covered by the full sweep |
 | `GWT_DAILY_SWEEP_CRON` | `43 5 * * *` | Short sweep; `off` disables |
 | `GWT_DAILY_SWEEP_DAYS` | `38` | Days covered by the short sweep. 38 = 30 + 8: every night in the next 30 days then has a scrape 6–8 days earlier on any day of the week, which "sold in the last 7 days" needs |
+| `GWT_INTRADAY_SWEEP_CRON` | `13 15 * * *` | Afternoon re-scrape of the nearest nights, for same-day price moves; `off` disables |
+| `GWT_INTRADAY_SWEEP_DAYS` | `14` | Days covered by the intraday sweep (~1 minute of requests at 14) |
 | `GWT_PORT` | `8080` | Web port inside the container (change the compose port mapping to match) |
 | `GWT_DB` | `/app/data/gwl.db` | SQLite path |
 | `GWT_USER_AGENT` | `great-wolf-tracker/<version> (...)` | User-Agent for API requests |
@@ -286,7 +291,7 @@ docker compose exec gwt python -m gwt unblock
 | `GWT_FINAL_FILL_MAX_LEAD` | `2` | A night's final fill counts only if its closest scrape was at most this many days before arrival |
 
 Notes:
-- Both scheduled jobs use the default run ID (today's date in Toronto). On Sundays the daily sweep skips dates the weekly sweep has already captured.
+- The weekly and daily jobs share the default run ID (today's date in Toronto), so on Sundays the daily sweep skips dates the weekly sweep has already captured. The intraday job has a run ID of its own (`YYYY-MM-DD-intraday`): it re-scrapes nights the morning sweeps already captured, and an interrupted one resumes the same afternoon.
 - Jobs that are missed while the container is down still run if it comes back within an hour. Otherwise they wait for the next slot.
 - The image has a `HEALTHCHECK` against `/healthz`, which also reports `collection_paused` and any `events_problem`.
 - Check the **Runs** page after the first few sweeps. **A run marked BLOCKED (403) pauses collection** until you run `gwt unblock` (see [Blocked runs](#blocked-runs-403)); there's no need to touch `GWT_SCHEDULE_ENABLED`. A **rate-limited** run (Retry-After over 10 minutes) simply ends; the next scheduled run carries on.
@@ -300,9 +305,9 @@ Charts and calendars use the full window width (24 px padding, 16 px on a phone)
 
 | Page | What it shows |
 |---|---|
-| **Plan** `/` | A wall calendar of the next 365 nights: today's month through the month of the 365th night, so 13 months with the last one partial (Sun–Sat, 6 months per row on a wide screen down to 1 on a phone). Each night is coloured by **Price** (default), **Rooms left** or **Pace**, with a legend in real values (quantile breaks over the nights shown, colourblind-safe blue ramp), distinct sold-out and no-data styles, today outlined, and a dot on no-school-next-day nights. The tooltip shows rooms left, % sold, lowest and reference rate, room types sold out, lead days, pace and school closures. Below: a price vs pace scatter (rooms left on a toggle; the note says how many nights have no pace yet) with day-window and weekday filters and the cheap-and-quiet quadrant shaded, then **Cheapest upcoming nights** and **Filling fastest** (nights that sold rooms in the last 7 days first, most sold first, then the rest by pace), each with its rule stated and a **Book ↗** link per night |
+| **Plan** `/` | A wall calendar of the next 365 nights: today's month through the month of the 365th night, so 13 months with the last one partial (Sun–Sat, 6 months per row on a wide screen down to 1 on a phone). Each night is coloured by **Price** (default), **Rooms left** or **Pace**, with a legend in real values (quantile breaks over the nights shown, colourblind-safe blue ramp), distinct sold-out and no-data styles, today outlined, and a dot on no-school-next-day nights. The tooltip shows rooms left, % sold, lowest and reference rate, room types sold out, lead days, pace and school closures. Below: a price vs pace scatter (rooms left on a toggle; the note says how many nights have no pace yet) with day-window and weekday filters and the cheap-and-quiet quadrant shaded, then **Cheapest upcoming nights** and **Filling fastest** (nights that sold rooms in the last 7 days first, most sold first, then the rest by pace), each with its rule stated and a **Book ↗** link per night, and **Price moves since the previous scan** (next 38 nights whose lowest rate changed between their last two scans within 24 h: biggest drops first, then reopened, rises, sold out). **Prices for** (Any room / Themed and up / Premium and up / Cottages) switches every price on the page to the cheapest room of that category or above (`?tier=`); rooms left and pace stay lodge-wide |
 | **Seasonality** `/seasonality` (`/trends` redirects) | "How full each week ends up": average final-fill % sold by week of the year, one line per year, Fri–Sat and Sun–Thu nights in two panels, school breaks shaded (fills in one night per day). "Forecast from current prices": average lowest rate per week for the next 52 weeks, Sun–Thu vs Fri–Sat, breaks shaded and named |
-| **Night** `/date/YYYY-MM-DD` | A **Book this night on greatwolf.com** link (upcoming nights only; opens the public booking page for 1 night, 2 adults). Tiles for rooms left (% sold), lowest rate, reference rate, room types fully sold (of ~17), days until arrival, pace, sold in the last 7 days, and school-closure tags. Then the rooms table (codes grouped into rooms, expandable into variants with accessibility, beds, baths and rates) and booking curves for rooms left and lowest rate: this night against the median and 10th–90th percentile of every other night at the same days-out |
+| **Night** `/date/YYYY-MM-DD` | A **Book this night on greatwolf.com** link (upcoming nights only; opens the public booking page for 1 night, 2 adults). Tiles for rooms left (% sold), lowest rate (with the previous scan's rate when it changed within 24 h), reference rate, room types fully sold (of ~17), days until arrival, pace, sold in the last 7 days, and school-closure tags. Then the rooms table (codes grouped into rooms, expandable into variants with accessibility, beds, baths and rates) and booking curves for rooms left and lowest rate: this night against the median and 10th–90th percentile of every other night at the same days-out |
 | **Room types** `/suites` | A room × date matrix (30/60/90/365-day window, default 90) coloured by rooms left as a share of the most that room has had, sold-out cells dark with ×, weekend columns marked: which rooms sell out first. Then every room with its codes, first/last seen and lowest rate seen |
 | Room `/rooms/{slug}` | One grouped room: rooms left and cheapest rate across upcoming nights, and its booking curve for a chosen night (`?date=`; a past night with data is added to the picker, a night without data falls back to the first upcoming one with a note) |
 | Suite code `/suites/{code}` | The same for a single suite code |
@@ -314,7 +319,7 @@ JSON API (for Home Assistant etc.):
 
 | Route | Returns |
 |---|---|
-| `/api/plan` | Every upcoming night with the metrics above (nulls where there's no data yet), plus the cheapest-nights and filling-fastest lists with their rules |
+| `/api/plan?tier=` | Every upcoming night with the metrics above (nulls where there's no data yet; `min_rate` in the chosen tier, `lodge_min_rate` for any room), plus the cheapest-nights, filling-fastest and price-moves lists with their rules |
 | `/api/seasonality` | Final fill by week of year per year (both night types), the 52-week price forecast, and closure spans |
 | `/api/dates/{YYYY-MM-DD}` | One night: tiles, rooms with variants, booking curves and comparison bands (404 if never scraped) |
 | `/api/rooms`, `/api/rooms/{slug}?date=` | Grouped rooms; one room's upcoming availability and booking curve |
