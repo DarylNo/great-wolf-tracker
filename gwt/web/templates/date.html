@@ -4,6 +4,7 @@
 {% block head %}<script src="/static/plotly.min.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 <h1>{{ arrival.isoformat() | datelong }}</h1>
+{% if arrival >= today %}<p class="book"><a href="{{ arrival | booking_url }}" target="_blank" rel="noopener">Book this night on greatwolf.com ↗</a> <span class="sub">1 night, 2 adults; live prices may differ from the last scrape</span></p>{% endif %}
 
 {% if not has_data %}
   {{ nodata() }}

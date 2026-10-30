@@ -22,6 +22,8 @@ API_BASE = "https://prod.api.greatwolf.com"
 AVAILABILITY_PATH = f"/room-booking/v2/lodges/{LODGE_CODE}/availability"
 REF_SUITE_CODE = "SFSSB"
 NUM_ADULTS = 2
+# Public booking page for the same 1-night, 2-adult query (docs/endpoints.md); dashboard links only.
+BOOKING_PAGE = "https://www.greatwolf.com/niagara/plan"
 
 DEFAULT_USER_AGENT = (
     f"great-wolf-tracker/{__version__} "
@@ -47,6 +49,14 @@ def build_params(arrival: date) -> dict[str, str]:
         "offerCode": "",
         "kidsAges": "",
     }
+
+
+def booking_url(arrival: date | str) -> str:
+    """greatwolf.com booking page for a 1-night, 2-adult stay starting on `arrival`."""
+    if isinstance(arrival, str):
+        arrival = date.fromisoformat(arrival)
+    departure = arrival + timedelta(days=1)
+    return f"{BOOKING_PAGE}?numberOfAdults={NUM_ADULTS}&arrival={arrival.isoformat()}&departure={departure.isoformat()}"
 
 
 def make_client(transport: httpx.BaseTransport | None = None, timeout: float = 30.0) -> httpx.Client:

@@ -5,6 +5,7 @@ import httpx
 
 from gwt.collector import (
     AVAILABILITY_PATH,
+    booking_url,
     build_params,
     fetch_availability,
     make_client,
@@ -24,6 +25,12 @@ def test_build_params_one_night():
         "kidsAges": "",
     }
     assert "uuid" not in params
+
+
+def test_booking_url_matches_the_one_night_query():
+    expected = "https://www.greatwolf.com/niagara/plan?numberOfAdults=2&arrival=2026-12-31&departure=2027-01-01"
+    assert booking_url(date(2026, 12, 31)) == expected
+    assert booking_url("2026-12-31") == expected
 
 
 def test_parse_run_level_row(sample_payload):

@@ -210,6 +210,14 @@ def test_date_page(client):
     assert "Timber Wolf Cottage" in html and "SFSSA" in html and "CTWAA" in html
     assert 'id="curve-rooms"' in html and 'id="curve-rate"' in html
     assert "Show as a table" in html
+    assert 'href="https://www.greatwolf.com/niagara/plan?numberOfAdults=2&amp;arrival=2026-11-21&amp;departure=2026-11-22"' in html
+
+
+def test_booking_links_only_for_upcoming_nights(client):
+    assert "Book this night on greatwolf.com" in client.get("/date/2026-10-28").text  # today
+    assert "Book this night on greatwolf.com" not in client.get("/date/2026-10-27").text
+    plan = client.get("/").text
+    assert plan.count("Book ↗") >= 1 and "greatwolf.com/niagara/plan?" in plan
 
 
 def test_date_page_closure_tags(client):
